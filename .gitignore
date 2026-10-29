@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Model weights (downloaded at runtime - see src/ai-surveillance/models/README.md)
+src/ai-surveillance/models/*
+!src/ai-surveillance/models/README.md
+
+# Runtime artifacts
+src/ai-surveillance/*.log
+data/*.db
+data/**/*.jpg
+data/**/*.mp4
+
+# Android build
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
