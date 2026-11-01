@@ -1,0 +1,10 @@
+{
+  "video": "WhatsApp Video 2026-10-10 at 11.34.09 AM.mp4",
+  "frames": [20, 60, 100, 140, 180, 220, 260, 300],
+  "labelled_by": "hand-labelled from the 8 eval frames (benchmarks/out/ppt/evalframes.jpg)",
+  "truth": "Every frame: fast, turbulent muddy floodwater on both sides of a long bridge/walkway; people crossing the bridge over it (2 in frames 20-140, more later); bridge surface partly washed with mud; crowd on the far bank in frames 180-300.",
+  "alert_ok": ["high", "critical"],
+  "flood_types": ["flood", "rising_water", "fast_current", "road_flooded", "bridge_submerged", "bridge_damaged", "building_flooded"],
+  "fast_types": ["fast_current"],
+  "contradictions": ["slow flow", "slow-moving", "moving slowly", "no floodwater", "no visible floodwater", "no flood", "calm water", "there is no visible water"]
+}

@@ -541,7 +541,8 @@ class VLMAnalyzer:
                         if torch is not None and torch.cuda.is_available() else None)
         self._gd = None
         if (self.cfg.get("fast_decode") and model is not None and torch is not None
-                and torch.cuda.is_available()):
+                and torch.cuda.is_available()
+                and not any(type(m).__name__ == "Linear8bitLt" for m in model.modules())):
             try:
                 from vlm.fast_decode import GraphDecoder
                 eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None) or []
