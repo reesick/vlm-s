@@ -32,6 +32,10 @@ class GraphDecoder:
                  device: str | torch.device = "cuda:0"):
         from transformers import StaticCache
 
+        # A PEFT-wrapped model (unmerged QLoRA adapter): run the underlying
+        # model; the LoRA layers are injected into its modules and still apply.
+        if hasattr(model, "get_base_model"):
+            model = model.get_base_model()
         self.model = model
         self.lm = model.model.language_model
         self.embed = self.lm.embed_tokens

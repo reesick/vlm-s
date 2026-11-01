@@ -50,6 +50,11 @@ model:
   # torch build (archived upstream). NF4 is announced here; the load path prints
   # the actual backend so a silent substitution cannot happen.
   quantization: "nf4"    # "nf4" | "awq" | null (null = full bfloat16, will OOM at 3B)
+  double_quant: true     # QLoRA-style NF4 double quantization: 2.40 -> 2.25 GB, same decode speed
+  # QLoRA adapter trained on the frozen NF4 model (tools/qlora_train.py), loaded
+  # unmerged (merging into 4-bit rounds the delta away). Empty = base model.
+  # Held-out flood frames: correct alert 25% -> 100%; see benchmarks/quant_eval.py.
+  lora_adapter: "models/lora/flood_v1"
 
 # Ambient task: flood-monitoring deployment
 ambient:

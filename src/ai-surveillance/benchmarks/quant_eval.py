@@ -1,4 +1,4 @@
-"""Quantization accuracy + efficiency benchmark for Qwen2.5-VL-3B on flood footage.
+﻿"""Quantization accuracy + efficiency benchmark for Qwen2.5-VL-3B on flood footage.
 
 Same model, different weight formats. Accuracy is measured two ways:
   1. Fidelity to full precision: an fp16 reference (partly CPU-offloaded, slow,
@@ -35,6 +35,8 @@ OUT = APP_DIR / "benchmarks" / "out" / "quant"
 VIDEO = APP_DIR.parents[1] / "WhatsApp Video 2026-10-10 at 11.34.09 AM.mp4"
 MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 FRAME_IDX = [20, 60, 100, 140, 180, 220, 260, 300]
+HELDOUT_FROM = 180            # tools/qlora_train.py trains on frames 0-169 only
+NEG_EVAL = ["data/keyframes/FALL_2026-10-30T12-32-45_f2082_id208.jpg"]   # unseen, no water
 
 VARIANTS = {
     # name: (description, loader kwargs builder)
@@ -71,8 +73,9 @@ def load_variant(name: str, adapter: str | None = None):
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(MODEL, **kw).eval()
     if adapter:
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, adapter).eval()
-        model = model.merge_and_unload() if not name.startswith(("nf4", "int8")) else model
+        # merged into the 4-bit weights, exactly as vlm/core.py deploys it
+        model = PeftModel.from_pretrained(model, adapter)
+        model = (model.eval() if os.environ.get("LORA_NOMERGE") else model.merge_and_unload().eval())
     proc = AutoProcessor.from_pretrained(MODEL)
     load_gb = torch.cuda.memory_allocated() / 2**30
     dm = getattr(model, "hf_device_map", {}) or {}
@@ -108,6 +111,15 @@ def eval_frames():
             hist.update(tracks, t=fi / fps)
         out.append((idx, idx / fps, fr, actors_from_tracks(tracks, hist, fr.shape)))
     cap.release()
+    return out
+
+
+def neg_frames():
+    out = []
+    for pth in NEG_EVAL:
+        img = cv2.imread(str(APP_DIR / pth))
+        if img is not None:
+            out.append((pth, img))
     return out
 
 
@@ -169,7 +181,13 @@ def run_variant(name: str, adapter: str | None, tag: str) -> None:
         rows.append(row)
         print(f"[{tag}] frame {idx}: {a.latency_s:.2f}s [{a.alert_level}] {a.scene[:100]}"
               + (f"  agree={row['tf_agree']:.3f} nll={row['tf_nll']:.3f}" if "tf_agree" in row else ""))
-    res = {"variant": name, "tag": tag, "adapter": adapter, "desc": VARIANTS.get(name, ""),
+    negs = []
+    for pth, img in neg_frames():
+        a = an.analyze(img, [], force=True)
+        negs.append({"image": pth, "alert_level": a.alert_level, "scene": a.scene,
+                     "hazards": a.hazards})
+        print(f"[{tag}] negative {Path(pth).name}: [{a.alert_level}] {a.scene[:100]}")
+    res = {"variant": name, "tag": tag, "negatives": negs, "adapter": adapter, "desc": VARIANTS.get(name, ""),
            "load_s": round(load_s, 1), "load_vram_gb": round(load_gb, 2),
            "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
            "offloaded_to": offloaded, "fast_decode": an.fast_decode_active, "rows": rows}
@@ -197,20 +215,27 @@ def report() -> None:
     for f in files:
         r = json.loads(f.read_text())
         rr = r["rows"]
-        sc = task_score(rr, labels)
+        sc = task_score([x for x in rr if x["frame"] >= HELDOUT_FROM], labels)
+        sc_all = task_score(rr, labels)
+        negs = r.get("negatives", [])
+        sc["neg_false_alarm"] = (sum(n["alert_level"] not in ("none", "low") for n in negs) / len(negs)) if negs else None
+        sc["alert_all"] = sc_all["alert_ok"]
         lat = np.mean([x["latency_s"] for x in rr])
         tps = [x["tok_s"] for x in rr if x.get("tok_s")]
         agree = [x["tf_agree"] for x in rr if "tf_agree" in x]
         nll = [x["tf_nll"] for x in rr if "tf_nll" in x]
         rows.append((r["tag"], r["load_vram_gb"], r["peak_vram_gb"], lat, np.mean(tps) if tps else None,
                      np.mean(agree) if agree else None, np.mean(nll) if nll else None, sc, r["offloaded_to"]))
+    print("accuracy columns = held-out frames >= %d (frames the QLoRA adapter never saw)" % HELDOUT_FROM)
     print(f"{'variant':<22}{'VRAM':>6}{'peak':>6}{'lat s':>7}{'tok/s':>7}{'agree':>7}{'NLL':>7}"
-          f"{'alert':>7}{'flood':>7}{'fast':>6}{'calm!':>7}{'json':>6}")
+          f"{'alert':>7}{'flood':>7}{'fast':>6}{'calm!':>7}{'json':>6}{'allfr':>7}{'negFA':>7}")
     for tag, lv, pv, lat, tps, ag, nl, sc, off in rows:
         f = lambda v, p=2: "-" if v is None else f"{v:.{p}f}"  # noqa: E731
         print(f"{tag:<22}{lv:>6.2f}{pv:>6.2f}{lat:>7.2f}{f(tps, 1):>7}{f(ag, 3):>7}{f(nl, 3):>7}"
               f"{sc['alert_ok']:>7.0%}{sc['flood_reported']:>7.0%}{sc['fast_water']:>6.0%}"
-              f"{sc['says_calm']:>7.0%}{sc['json_ok']:>6.0%}" + (f"  (offload: {off})" if off else ""))
+              f"{sc['says_calm']:>7.0%}{sc['json_ok']:>6.0%}{sc['alert_all']:>7.0%}"
+              f"{('-' if sc['neg_false_alarm'] is None else format(sc['neg_false_alarm'], '.0%')):>7}"
+              + (f"  (offload: {off})" if off else ""))
 
 
 if __name__ == "__main__":

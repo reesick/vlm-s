@@ -65,6 +65,8 @@ class VLMConfig:
     max_pixels: int = 602112
     min_pixels: int = 3136
     quantization: str = "nf4"   # "nf4" | "awq" | null/empty = full precision
+    double_quant: bool = True   # NF4 double quantization (QLoRA default)
+    lora_adapter: str = ""      # optional QLoRA adapter dir merged at load time
     max_vram_gb: float = 3.5    # hard ceiling; load aborts if exceeded
 
     # Warmup frame dimensions. Default None — resolved from the pipeline
@@ -100,6 +102,8 @@ class VLMConfig:
             max_pixels=model_cfg.get("max_pixels", 602112),
             min_pixels=model_cfg.get("min_pixels", 3136),
             quantization=model_cfg.get("quantization", "nf4"),
+            double_quant=bool(model_cfg.get("double_quant", True)),
+            lora_adapter=str(model_cfg.get("lora_adapter") or ""),
             max_vram_gb=float(model_cfg.get("max_vram_gb", 3.5)),
             warmup_frame_height=model_cfg.get("warmup_frame_height", src_h),
             warmup_frame_width=model_cfg.get("warmup_frame_width", src_w),
@@ -212,13 +216,14 @@ class VLMCore:
                     "which exceeds the 6 GB VRAM budget."
                 )
             # fp16 compute matches the fp16 non-quantized modules (torch_dtype
-            # below) and single quantization skips the double-dequant step:
-            # measured 10.1 -> 12.1 tok/s decode on the RTX 4050 for +0.15 GB.
+            # below). Double quantization (QLoRA's default) re-quantizes the
+            # per-block scales: 2.40 -> 2.25 GB and no decode slowdown with the
+            # CUDA-graph decoder (39.1 vs 39.9 tok/s, benchmarks/quant_eval.py).
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=False,
+                bnb_4bit_use_double_quant=bool(self.config.double_quant),
             )
             print("[VLM] Using bitsandbytes NF4 4-bit quantization (announced)")
 
@@ -277,6 +282,20 @@ class VLMCore:
             max_pixels=self.config.max_pixels,
             local_files_only=True,
         )
+
+        if self.config.lora_adapter:
+            ad = Path(self.config.lora_adapter)
+            if not ad.is_absolute():
+                ad = Path(__file__).resolve().parents[1] / ad
+            if not (ad / "adapter_config.json").is_file():
+                raise RuntimeError(f"[VLM] lora_adapter not found: {ad}")
+            from peft import PeftModel
+            # Kept UNMERGED on purpose: merging a LoRA delta into NF4 weights
+            # re-quantizes them and the small delta rounds away (measured: the
+            # merged model behaved like the base model). Unmerged costs a few
+            # small extra matmuls per layer, all inside the CUDA graph.
+            self._model = PeftModel.from_pretrained(self._model, str(ad))
+            print(f"[VLM] QLoRA adapter loaded (unmerged): {ad}")
 
         self._model.eval()
 
