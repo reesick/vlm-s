@@ -535,6 +535,10 @@ class VLMAnalyzer:
         self.profile_name = ""
         self.set_profile(profile or self.cfg.get("active_profile") or "generic")
         self._im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        # All VLM GPU work runs on its own stream so the detector's kernels on the
+        # default stream are not queued behind seconds of VLM work.
+        self._stream = (torch.cuda.Stream(device=self._model_device())
+                        if torch is not None and torch.cuda.is_available() else None)
         self._gd = None
         if (self.cfg.get("fast_decode") and model is not None and torch is not None
                 and torch.cuda.is_available()):
@@ -597,7 +601,7 @@ class VLMAnalyzer:
             return
         t0 = time.perf_counter()
         gray = np.full((112, 112, 3), 128, dtype=np.uint8)
-        with torch.inference_mode():
+        with self._on_stream(), torch.inference_mode():
             inputs = self._encode("Hi", gray)
             self._generate(2, **inputs)
             if self._gd is not None:
@@ -610,6 +614,19 @@ class VLMAnalyzer:
                           "using HF generate")
                     self._gd = None
         print(f"[VLMAnalyzer] warmup done in {time.perf_counter() - t0:.2f}s")
+
+    def _on_stream(self):
+        import contextlib
+        return torch.cuda.stream(self._stream) if self._stream is not None else contextlib.nullcontext()
+
+    def _wait_stream(self) -> None:
+        """Wait for queued VLM work with the GIL released (polling, not a blocking sync)."""
+        if self._stream is None:
+            return
+        evt = torch.cuda.Event()
+        evt.record(self._stream)
+        while not evt.query():
+            time.sleep(0.001)
 
     @property
     def fast_decode_active(self) -> bool:
@@ -697,7 +714,9 @@ class VLMAnalyzer:
                                actors=copy.deepcopy(prev.actors), timings=timings,
                                cached=True, latency_s=time.perf_counter() - t_start)
 
-            result = self._analyze_uncached(frame_bgr, actors, extra_context, max_pixels)
+            with self._on_stream():
+                result = self._analyze_uncached(frame_bgr, actors, extra_context, max_pixels)
+                self._wait_stream()
             result.latency_s = time.perf_counter() - t_start
             self._last, self._last_key, self._last_thumb = result, key, thumb
             self._last_t = time.monotonic()
@@ -910,7 +929,7 @@ class VLMAnalyzer:
               "the situation changed. Start with 'OVERALL: <LEVEL>.' where LEVEL is one of "
             + ", ".join(ALERT_LEVELS) + "."
         )
-        with self._lock, torch.inference_mode():
+        with self._lock, self._on_stream(), torch.inference_mode():
             inputs = self._encode(prompt, None)
             n = inputs["input_ids"].shape[1]
             if self._gd is not None:

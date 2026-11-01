@@ -53,6 +53,7 @@ class GraphDecoder:
         self.seen = torch.zeros(vocab, dtype=torch.bool, device=self.dev)
         self.penalty = torch.ones((), dtype=torch.float32, device=self.dev)
         self.graph: torch.cuda.CUDAGraph | None = None
+        self._evt = torch.cuda.Event()
         self.capture_s = 0.0
 
     # ------------------------------------------------------------------ core
@@ -144,7 +145,12 @@ class GraphDecoder:
             raise RuntimeError("graph captured mid-call; retry")
         while len(out) < budget and out[-1] not in self.eos:
             self.graph.replay()
-            out.append(int(self.ids))     # one host sync per token (GPU-bound anyway)
+            # Wait for the step with the GIL released (sleep), not with a
+            # blocking .item(): the camera/detector thread must keep running.
+            self._evt.record()
+            while not self._evt.query():
+                time.sleep(0.0005)
+            out.append(int(self.ids))
         return out
 
     def warmup(self, text_inputs: dict) -> None:

@@ -427,6 +427,14 @@ def run(config_path: str | None = None, video: str | None = None, loop: bool = F
     _vlm_lock = threading.Lock()
     _vlm_last_output: list[Any] = []     # [most_recent_output] or []
     _vlm_scene_text: list[str] = [""]   # [human-readable scene description] — list for mutability
+    # Duty cycle: the VLM is relaunched no sooner than this after its last real
+    # inference. While it runs the frame loop drops from ~49 to ~11 FPS (GPU
+    # shared on one laptop GPU), so back-to-back calls would pin the loop low.
+    # FALL / FIRE / FIGHT / VIOLENCE skip the gap.
+    _vlm_stage_cfg = (cfg.get("router", {}).get("stages", {}) or {}).get("vlm_escalated", {}) or {}
+    _vlm_min_gap_s = float(_vlm_stage_cfg.get("min_interval_s", 4.0)) if isinstance(_vlm_stage_cfg, dict) else 4.0
+    _vlm_last_done_t: list[float] = [-1e9]
+    _VLM_URGENT = {"FALL", "FIRE", "FIGHT", "VIOLENCE"}
 
     # --- Bitchat mesh integration ------------------------------------------
     bitchat_client = None
@@ -849,7 +857,10 @@ def run(config_path: str | None = None, video: str | None = None, loop: bool = F
                 # Flood deployment: only call the VLM while a flood is flagged, so
                 # every description is grounded by the detector (no blind frame-0 call).
                 if (router.should_run("vlm_escalated", frame_idx)
-                        and (_vlm_thread is None or not _vlm_thread.is_alive())):
+                        and (_vlm_thread is None or not _vlm_thread.is_alive())
+                        and (time.perf_counter() - _vlm_last_done_t[0] >= _vlm_min_gap_s
+                             or any(getattr(e, "event_type", "") in _VLM_URGENT
+                                    for e in phase4_events + fall_events + fight_events))):
                     all_events_this_frame = (
                         phase4_events + fall_events + identity_events + fight_events
                     )
@@ -867,6 +878,8 @@ def run(config_path: str | None = None, video: str | None = None, loop: bool = F
                                     trs=_tracks_snap):
                         try:
                             out = vlm_integration.process_frame(f, fi, evts, trs)
+                            if out is not None and not getattr(getattr(out, "analysis", None), "cached", False):
+                                _vlm_last_done_t[0] = time.perf_counter()
                             with _vlm_lock:
                                 _vlm_result.append((out, f))
                         except Exception as _e:
