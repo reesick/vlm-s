@@ -19,6 +19,16 @@
 #   - Ambient pass / encode_frame / _compute_attention_flag_PLACEHOLDER.
 #   - TemporalMerger (output consumed by nothing).
 #
+# What exists now (vlm/analyzer.py, `analyzer` + `profiles` below):
+#   - One analysis = 2 turns in ONE conversation: turn 1 image + profile scene
+#     prompt -> short description; turn 2 -> JSON {alert_level, hazards, actors}.
+#     Turn 2 reuses turn 1's KV cache (the image is encoded once).  This is real
+#     attention state returned by generate(), unlike the removed KV tiers.
+#   - Frame resized by the analyzer to image_max_pixels (~256 visual tokens);
+#     model.max_pixels below only caps the processor (legacy/query paths).
+#   - Tracker boxes drawn with ids (P1, V1, ...) so the model reports per actor.
+#   - Unchanged-scene cache; per-deployment profiles (add one, no code change).
+#
 # VRAM budget: 6.0 GiB (RTX 4050 Laptop).
 # Target: full detector stack + 3B NF4 stays under 5.8 GiB.
 # Hard ceiling: model.max_vram_gb below. Load aborts if exceeded.
@@ -41,10 +51,62 @@ model:
   # the actual backend so a silent substitution cannot happen.
   quantization: "nf4"    # "nf4" | "awq" | null (null = full bfloat16, will OOM at 3B)
 
+# Ambient task: flood-monitoring deployment
+ambient:
+  task_prompt: "Monitor for: flooding, rising or fast-moving water, stranded or endangered people, submerged vehicles, roads and bridges."
+
 # Escalated pass - full fidelity processing triggered by detector events
 escalated:
   max_tokens: 256         # reduced from 512; enough for entity list at 3B scale
   context_window_frames: 15  # frames to include in escalation context window
+
+# Fast structured analyzer (vlm/analyzer.py). Each speed technique is a toggle.
+analyzer:
+  active_profile: flood        # flood | generic  (generalist structure: add a profile, no code change)
+  image_max_pixels: 200704     # 448x448-equivalent ~= 256 visual tokens (sides multiple of 28)
+  escalated_max_pixels: 401408 # used when detector priority is high (>= 0.7)
+  min_pixels: 3136
+  scene_max_new_tokens: 64     # turn 1: one-sentence scene description (~0.1 s per token at NF4)
+  actors_max_new_tokens: 220   # turn 2: JSON report (raised to 70 + 24 per actor when needed)
+  kv_reuse: true               # turn 2 continues from turn 1's KV cache (no image re-encode)
+  mark_actors: true            # draw tracker boxes + ids (Set-of-Mark) on the frame
+  max_actors: 8
+  skip_if_unchanged: true      # return previous result if the scene did not change
+  unchanged_threshold: 4.0     # mean abs diff on a 64x36 grayscale thumbnail
+  max_cache_age_s: 30
+  warmup: true                 # tiny generate at init to set up CUDA kernels
+  json_prefill: true           # force answer to start with {"alert_level": " -> compact JSON, no fence
+  prompt_lookup_tokens: 10     # turn 2: prompt-lookup speculative decoding (JSON copies ids/states
+                               # from the prompt; measured ~2x faster turn 2). 0 = off
+  json_repetition_penalty: 1.0 # turn 2 only; model default 1.05 penalises repeated JSON keys
+  fast_decode: true            # CUDA-graph greedy decoder over a static KV cache (vlm/fast_decode.py).
+                               # Measured on RTX 4050: 36 tok/s vs 5 tok/s with HF generate (CPU launch-bound).
+                               # Falls back to HF generate automatically if capture fails.
+  static_cache_len: 2048       # static KV slots (~75 MB at 3B); prompt + both turns must fit
+  scene_repetition_penalty: 1.05  # turn 1, same as the model's generation_config default
+  focus_blur: false            # blur background outside actor boxes (FGVP-style visual prompt; JPEG for
+                               # the phone shrinks ~26%). Off: on the flood clip it hurt the per-actor JSON.
+  focus_blur_ksize: 21
+  focus_blur_pad: 0.15
+
+profiles:
+  generic:
+    description: "general scene understanding"
+    scene_prompt: >-
+      Describe this camera frame in ONE sentence (under 30 words): the place, the
+      people, vehicles and objects and what they are doing, and anything unusual or
+      dangerous.
+    hazard_types: [fire, smoke, fall, fight, weapon, crowd, accident, flood, intrusion, abandoned_object, other]
+    actor_states: [normal, walking, running, standing, sitting, lying, fighting, fallen, in_vehicle, unknown]
+  flood:
+    description: "flood and rescue monitoring"
+    scene_prompt: >-
+      You are a flood and rescue monitoring camera. In ONE sentence (under 30 words)
+      say how much floodwater there is and how fast it flows, whether any bridge, road
+      or building is under water, and what the people and vehicles are doing. Only
+      call it a flood if floodwater is actually visible.
+    hazard_types: [flood, rising_water, fast_current, person_in_water, person_stranded, person_crossing, vehicle_in_water, bridge_submerged, bridge_damaged, building_flooded, road_flooded, debris, rescue_activity, other]
+    actor_states: [safe_ground, on_bridge, wading, in_water, stranded, swept_away, fleeing, rescuing, observing, in_vehicle, unknown]
 
 # Escalation thresholds
 escalation:
@@ -61,7 +123,7 @@ query:
   temperature: 0.1
   top_p: 0.9
   default_prompt_template: |
-    You are a surveillance assistant. Answer questions about the video stream.
+    You are a flood-response surveillance assistant. Answer questions about the video stream.
     Use the retrieved context to provide accurate, grounded responses.
     If something is not visible in the context, say so.
 

@@ -172,11 +172,49 @@ def _open_vram_log(path: str) -> tuple[Any, Any] | None:
     return w, f
 
 
-def run(config_path: str | None = None) -> None:
+def _video_source_override(src_cfg: dict, video: str, loop: bool) -> tuple[dict, tuple[int, int] | None]:
+    """Return a copy of src_cfg that plays `video` as a file source.
+
+    fps comes from the file's CAP_PROP_FPS (when > 0) so every time window is
+    sized at the file's real rate; width/height are cleared so the file's
+    native size is used. Also returns the native (w, h) if readable.
+    """
+    if not Path(video).is_file():
+        raise FileNotFoundError(f"[pipeline] --video file not found: {video}")
+    new = dict(src_cfg)
+    new.update({"type": "file", "path": str(video), "loop": bool(loop),
+                "width": None, "height": None})
+    native = None
+    cap = cv2.VideoCapture(str(video))
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"[pipeline] could not open --video file: {video}")
+        vfps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if vfps > 0:
+            new["fps"] = vfps
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if w > 0 and h > 0:
+            native = (w, h)
+    finally:
+        cap.release()
+    print(f"[pipeline] --video override: path={video} loop={loop} "
+          f"fps={new.get('fps')} native_size={native}")
+    return new, native
+
+
+def run(config_path: str | None = None, video: str | None = None, loop: bool = False,
+        profile: str | None = None, no_display: bool = False) -> None:
     from core.config import load_models_config  # always needed; don't import conditionally
     cfg = load_pipeline_config() if config_path is None else _load_extra(config_path)
+    _native_size: tuple[int, int] | None = None
+    if video:
+        cfg["source"], _native_size = _video_source_override(cfg["source"], video, loop)
     src_cfg = cfg["source"]
     disp = cfg.get("display", {})
+    if no_display:
+        disp = dict(disp, enabled=False)
+        cfg["display"] = disp
     perf = cfg.get("perf", {})
 
     # ONE authoritative frame rate, read once here and passed explicitly to
@@ -205,6 +243,8 @@ def run(config_path: str | None = None) -> None:
             from vlm import VLMIntegration
             vlm_integration = VLMIntegration()
             _sw, _sh = src_cfg.get("width"), src_cfg.get("height")
+            if not (_sw and _sh) and _native_size is not None:
+                _sw, _sh = _native_size
             if _sw and _sh:
                 vlm_integration.set_frame_size(int(_sw), int(_sh))
             _db_path = perf.get("event_db_path", "data/events.db")
@@ -215,6 +255,17 @@ def run(config_path: str | None = None) -> None:
                     f"model={vlm_integration.vlm_manager.config.model_name}  "
                     f"vlm_events_db={_db_path}"
                 )
+                if profile:
+                    _set_prof = getattr(vlm_integration, "set_profile", None)
+                    if callable(_set_prof):
+                        try:
+                            _set_prof(profile)
+                            print(f"[vlm] profile={profile}")
+                        except Exception as _pe:
+                            print(f"[vlm] WARN: set_profile({profile!r}) failed: {_pe}")
+                    else:
+                        print(f"[vlm] WARN: --profile {profile} ignored "
+                              f"(VLMIntegration has no set_profile)")
             else:
                 print("[vlm] WARN: VLM initialization failed — running without VLM layer")
                 vlm_integration = None
@@ -300,6 +351,12 @@ def run(config_path: str | None = None) -> None:
     gathering_det = None
     violence_det = None
     object_left_det = None
+    flood_det = None
+    _last_flood: list = [None]
+    if features.get("flood") and router.is_enabled("flood"):
+        from core.events import FloodDetector
+        flood_det = FloodDetector(models_cfg.get("flood", {}))
+        print(f"[pipeline] flood enabled  every={router.every('flood')}")
     if features.get("fire_smoke") and router.is_enabled("fire_smoke"):
         from core.events import FireSmokeDetector
         fire_smoke_det = FireSmokeDetector(models_cfg.get("fire_smoke", {}))
@@ -486,6 +543,11 @@ def run(config_path: str | None = None) -> None:
                     for d in detector.detect(frame)
                 ], default=[])
 
+            # --- VLM actor motion history: cheap, must see EVERY frame ---
+            if vlm_integration is not None and hasattr(vlm_integration, "update_tracks"):
+                stage("vlm_update_tracks", vlm_integration.update_tracks,
+                      tracks, time.perf_counter())
+
             # --- Motion prefilter: skip heavy stages on static frames ---
             has_motion = True  # Default to True (process everything)
             if motion_filter is not None:
@@ -524,7 +586,10 @@ def run(config_path: str | None = None) -> None:
             if has_motion and reid_mgr is not None and router.should_run("reid", frame_idx):
                 def _reid_stage():
                     evs = []
-                    relinks = reid_mgr.on_tracks_updated(frame, tracks)
+                    # ReIDManager embeds EVERY new track it is given; restrict to
+                    # persons so vehicles/animals never hit OSNet (person-only model).
+                    person_tracks = [tr for tr in tracks if getattr(tr, "cls", -1) == 0]
+                    relinks = reid_mgr.on_tracks_updated(frame, person_tracks)
                     for m in relinks:
                         if m.matched_track_id is not None:
                             print(f"[identity] REID re-link: track {m.new_track_id} "
@@ -594,6 +659,9 @@ def run(config_path: str | None = None) -> None:
             if fire_smoke_det is not None and router.should_run("fire_smoke", frame_idx):
                 phase4_events.extend(stage("fire_smoke", fire_smoke_det.detect,
                                            frame, frame_idx, default=[]))
+            if flood_det is not None and router.should_run("flood", frame_idx):
+                phase4_events.extend(stage("flood", flood_det.detect,
+                                           frame, frame_idx, default=[]))
             if has_motion and smoking_det is not None and router.should_run("smoking", frame_idx):
                 phase4_events.extend(stage("smoking", smoking_det.detect,
                                            frame, tracks, poses, frame_idx, default=[]))
@@ -612,6 +680,8 @@ def run(config_path: str | None = None) -> None:
                                            tracks, frame_idx, t=time.perf_counter(), default=[]))
             for ev in phase4_events:
                 print(f"[pipeline] {ev.event_type} frame={ev.frame_idx} {ev.details}")
+                if ev.event_type == "FLOOD":
+                    _last_flood[0] = (frame_idx, ev)
 
             # --- Phase 5D: skeleton-based fight detection ---
             fight_events: list = []
@@ -688,6 +758,9 @@ def run(config_path: str | None = None) -> None:
                         if vlm_output is not None:
                             ents  = vlm_output.detected_entities or []
                             scene = getattr(vlm_output, "scene_description", "")
+                            # Structured scene analysis (newer VLM code); None on older code.
+                            analysis = getattr(vlm_output, "analysis", None)
+                            _cached = bool(getattr(analysis, "cached", False)) if analysis is not None else False
                             
                             if vlm_output.is_escalated:
                                 print(
@@ -704,9 +777,27 @@ def run(config_path: str | None = None) -> None:
                                             f"conf={e.get('confidence',0):.0%}  "
                                             f"{e.get('description','')}"
                                         )
+                            if analysis is not None:
+                                _tm = getattr(analysis, "timings", None) or {}
+                                print(
+                                    f"[vlm] analysis alert={getattr(analysis, 'alert_level', '?')}  "
+                                    f"profile={getattr(analysis, 'profile', '?')}  "
+                                    f"latency={float(getattr(analysis, 'latency_s', 0.0) or 0.0):.2f}s  "
+                                    f"image_tokens={_tm.get('image_tokens', '?')}  "
+                                    f"kv_reused={_tm.get('kv_reused', '?')}  cached={_cached}"
+                                )
                             
                             # Use real scene description for the on-screen overlay.
-                            if scene:
+                            if analysis is not None and (getattr(analysis, "scene", "") or "").strip():
+                                _hud_lines = [f"[{str(getattr(analysis, 'alert_level', '?')).upper()}] "
+                                              f"{analysis.scene}"]
+                                for a in (getattr(analysis, "actors", None) or []):
+                                    _hud_lines.append(
+                                        f"#{a.get('id', '?')} {a.get('kind', '')}: "
+                                        f"{a.get('state', '')} {a.get('action', '')} "
+                                        f"(risk {a.get('risk', '?')})".strip())
+                                _vlm_scene_text[0] = "\n".join(_hud_lines)
+                            elif scene:
                                 _vlm_scene_text[0] = scene
                             elif ents:
                                 _vlm_scene_text[0] = "; ".join(
@@ -718,33 +809,64 @@ def run(config_path: str | None = None) -> None:
                                 if vlm_output.is_escalated:
                                     print("  \u2192 (no entities detected by VLM)")
                             
+                            # Phone text: structured message when available.
+                            if analysis is not None:
+                                try:
+                                    scene = analysis.to_message() or scene
+                                except Exception as _me:
+                                    print(f"[vlm] WARN: analysis.to_message() failed: {_me}")
+                                _mf = getattr(analysis, "marked_frame", None)
+                                if _mf is not None:
+                                    vlm_frame = _mf   # the numbered-box image the VLM saw
+                            
                             # Send to BitChat immediately with the frame that was analyzed
-                            if bitchat_client is not None and _bc_send_scene:
+                            if bitchat_client is not None and _bc_send_scene and _cached:
+                                print("[bitchat] Skipped: scene unchanged (cached analysis)")
+                            elif bitchat_client is not None and _bc_send_scene:
                                 if scene:
-                                    print(f"[bitchat] VLM scene ready: {scene[:60]}...")
-                                    if vlm_frame is not None:
-                                        bitchat_client.send_scene(scene, vlm_frame)
-                                        print(f"[bitchat] Sent VLM scene to BitChat with frame")
+                                    _recent = (_last_flood[0] is not None and
+                                               frame_idx - _last_flood[0][0] <= int(10 * (source_fps or 30.0)))
+                                    if _recent:
+                                        _wr = int(round(100 * _last_flood[0][1].details.get("water_ratio", 0)))
+                                        scene = (f"FLOOD ALERT {time.strftime('%H:%M:%S')} - sensor: moving water "
+                                                 f"over {_wr}% of view. Camera: {scene}")
                                     else:
-                                        bitchat_client.send_scene(scene, frame)
-                                        print(f"[bitchat] Sent VLM scene to BitChat (fallback frame)")
+                                        scene = f"{time.strftime('%H:%M:%S')} {scene}"
+                                    print(f"[bitchat] VLM scene ready: {scene[:60]}...")
+                                    # Only send when there is BOTH a real description and the
+                                    # exact frame it describes (never a different/fallback frame).
+                                    if vlm_frame is not None and scene.strip():
+                                        bitchat_client.send_scene(scene, vlm_frame)
+                                        print(f"[bitchat] Sent VLM description + its frame")
+                                    else:
+                                        print(f"[bitchat] Skipped: no analyzed frame for this description")
                                 else:
                                     print(f"[bitchat] No VLM scene to send")
 
 
                 # Submit a new VLM inference in background if the router says to
                 # AND no thread is currently running.
+                # Flood deployment: only call the VLM while a flood is flagged, so
+                # every description is grounded by the detector (no blind frame-0 call).
                 if (router.should_run("vlm_escalated", frame_idx)
                         and (_vlm_thread is None or not _vlm_thread.is_alive())):
                     all_events_this_frame = (
                         phase4_events + fall_events + identity_events + fight_events
                     )
+                    # keep the flood flag "sticky" for ~5 s so the VLM call (which
+                    # runs on its own cadence) still sees the detector's verdict
+                    if (_last_flood[0] is not None
+                            and not any(e.event_type == "FLOOD" for e in all_events_this_frame)
+                            and frame_idx - _last_flood[0][0] <= int(5 * (source_fps or 30.0))):
+                        all_events_this_frame = all_events_this_frame + [_last_flood[0][1]]
                     _frame_snap = frame.copy()   # copy so thread doesn't see a later frame
                     _fidx_snap  = frame_idx
+                    _tracks_snap = list(tracks)  # snapshot: loop rebinds/extends `tracks`
 
-                    def _vlm_worker(f=_frame_snap, fi=_fidx_snap, evts=all_events_this_frame):
+                    def _vlm_worker(f=_frame_snap, fi=_fidx_snap, evts=all_events_this_frame,
+                                    trs=_tracks_snap):
                         try:
-                            out = vlm_integration.process_frame(f, fi, evts, tracks)
+                            out = vlm_integration.process_frame(f, fi, evts, trs)
                             with _vlm_lock:
                                 _vlm_result.append((out, f))
                         except Exception as _e:
@@ -870,19 +992,22 @@ def run(config_path: str | None = None) -> None:
                         hud.append("VLM:thinking...")
                     elif vlm_output and vlm_output.is_escalated:
                         hud.append("VLM!")
-                    # Draw VLM scene description at bottom of frame
+                    # Draw the full VLM description as a word-wrapped panel at the bottom
                     if _vlm_scene_text[0]:
-                        scene_lines = [_vlm_scene_text[0][i:i+80]
-                                       for i in range(0, min(len(_vlm_scene_text[0]), 240), 80)]
-                        frame_h = vis.shape[0]
-                        for li, line in enumerate(scene_lines):
-                            y_pos = frame_h - 12 - (len(scene_lines) - 1 - li) * 18
-                            cv2.rectangle(vis,
-                                          (0, y_pos - 14),
-                                          (min(len(line) * 9 + 6, vis.shape[1]), y_pos + 4),
-                                          (0, 0, 0), -1)
-                            cv2.putText(vis, line, (4, y_pos),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 180), 1)
+                        import textwrap
+                        fh, fw = vis.shape[:2]
+                        fs = max(0.5, fw / 1400)
+                        th_px = int(28 * fs)
+                        cols = max(20, int(fw / (11 * fs)))
+                        lines = [w for para in _vlm_scene_text[0].split("\n")
+                                 for w in (textwrap.wrap(para, cols) or [""])][:8]
+                        panel_h = th_px * len(lines) + 12
+                        overlay = vis.copy()
+                        cv2.rectangle(overlay, (0, fh - panel_h), (fw, fh), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.65, vis, 0.35, 0, vis)
+                        for li, line in enumerate(lines):
+                            cv2.putText(vis, line, (8, fh - panel_h + 6 + th_px * (li + 1) - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 180), 1, cv2.LINE_AA)
                     vram_vlm = vlm_stats.get("vlm", {}).get("vram_mb", 0)
                     if vram_vlm > 0:
                         hud.append(f"VLM:{vram_vlm}MB")
@@ -994,5 +1119,12 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=None, help="path to a pipeline yaml (defaults to configs/pipeline.yaml)")
+    p.add_argument("--video", default=None, metavar="PATH",
+                   help="play a video file instead of the configured source (fps/size from the file)")
+    p.add_argument("--loop", action="store_true", help="with --video: restart the file at EOF")
+    p.add_argument("--profile", default=None, metavar="NAME",
+                   help="VLM analysis profile (e.g. flood); applied after VLM init")
+    p.add_argument("--no-display", action="store_true", help="disable the OpenCV window")
     args = p.parse_args()
-    run(args.config)
+    run(args.config, video=args.video, loop=args.loop, profile=args.profile,
+        no_display=args.no_display)

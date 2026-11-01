@@ -15,8 +15,15 @@ detector:
   device: cuda:0
   conf: 0.35
   iou: 0.5
-  classes: [0, 24, 26, 28, 39]          # persons (0) + backpack (24) + handbag (26) + suitcase (28) + bottle (39)
-                                        # ObjectLeftDetector requires non-person classes; cost is negligible (rare classes)
+  classes: [0, 1, 2, 3, 5, 7, 8, 16, 17, 19, 24, 26, 28, 39]
+                                        # person (0); flood-relevant actors: bicycle (1), car (2),
+                                        # motorcycle (3), bus (5), truck (7), boat (8), dog (16),
+                                        # horse (17), cow (19) — tracked so the VLM/actor list can
+                                        # reference them; backpack (24) + handbag (26) + suitcase (28)
+                                        # + bottle (39) for ObjectLeftDetector. Same single YOLO pass,
+                                        # so extra classes cost ~nothing. Person-only stages (pose,
+                                        # face, ReID, PAR, fight, smoking, phone, gathering, violence,
+                                        # event_buffer) filter cls == 0; ObjectLeft ignores vehicles/animals.
 
 # --- Phase 5A: Pose Smoother ---
 # One-Euro filter per keypoint + EMA bbox stabilisation + confidence gating.
@@ -106,6 +113,8 @@ face:
   dim: 512                               # MobileFaceNet embedding dimension
   match_threshold: 0.4                   # cosine sim above this = same face
   index_path: models/face_index          # where to persist the enrolled-face FAISS index
+  root: "."                              # insightface root; "." -> <cwd>/models keeps
+                                         # SCRFD/MobileFaceNet weights off the system drive
 
 # --- Phase 4: Fire/Smoke Detection ---
 # Uses YOLOv8n fine-tuned on D-Fire dataset for accurate detection.

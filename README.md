@@ -128,6 +128,12 @@ python run_vlm_to_bitchat.py
 
 # Discover and diagnose the Android Bitchat API
 python diagnose_connection.py --ip <ANDROID_IP>
+
+# Offline flood-video report (YOLO tracks + flood sensor + VLM keyframes)
+python run_flood_video.py <video>
+
+# Full pipeline on a recorded file with the flood VLM profile
+python -m pipeline.main_loop --video <file> --profile flood
 ```
 
 Press `Q` or `Esc` in the video window to stop the live pipeline. In VLM-only mode, press `Space` to force an inference pass.

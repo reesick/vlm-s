@@ -73,7 +73,11 @@ class VLMConfig:
     warmup_frame_width: int | None = None
 
     escalated_max_tokens: int = 256
-    task_prompt: str = "Monitor for: people, distress postures, fire, smoke, objects left behind."
+    task_prompt: str = "Monitor for: flooding, rising or fast-moving water, stranded or endangered people, submerged vehicles, roads and bridges."
+
+    # vlm.yaml `analyzer` and `profiles` sections (see vlm/analyzer.py).
+    analyzer_cfg: dict = field(default_factory=dict)
+    profiles: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, path: str = DEFAULT_VLM_CONFIG) -> "VLMConfig":
@@ -101,7 +105,9 @@ class VLMConfig:
             warmup_frame_width=model_cfg.get("warmup_frame_width", src_w),
             escalated_max_tokens=escalated_cfg.get("max_tokens", 256),
             task_prompt=cfg.get("ambient", {}).get("task_prompt",
-                "Monitor for: people, distress postures, fire, smoke, objects left behind."),
+                "Monitor for: flooding, rising or fast-moving water, stranded or endangered people, submerged vehicles, roads and bridges."),
+            analyzer_cfg=dict(cfg.get("analyzer") or {}),
+            profiles=dict(cfg.get("profiles") or {}),
         )
 
 
@@ -116,6 +122,7 @@ class VLMOutput:
     confidence: float = 0.0
     reasoning: str = ""
     scene_description: str = ""   # natural language: what the model actually sees
+    analysis: Any = None          # vlm.analyzer.SceneAnalysis when produced by the analyzer
 
 
 class VLMCore:
@@ -133,7 +140,7 @@ class VLMCore:
         self._processor = None
         self._initialized = False
         self._frame_count = 0
-        self._last_scene_description: str = ""  # set by _run_model_inference
+        self._last_scene_description: str = ""  # set by run_escalated_pass / legacy path
 
         self._device = self.config.device
         self._dtype = (
@@ -144,6 +151,9 @@ class VLMCore:
 
         # Actual frame size, injected from the live video source when known.
         self._frame_size: tuple[int, int] | None = None
+
+        # Created after model load (vlm.analyzer.VLMAnalyzer).
+        self.analyzer = None
 
     def set_frame_size(self, width: int, height: int) -> None:
         """Record the real capture resolution (pre-initialize, for warmup)."""
@@ -159,6 +169,16 @@ class VLMCore:
 
         try:
             self._load_model()
+            from vlm.analyzer import VLMAnalyzer
+            # warmup runs inside the constructor when analyzer.warmup is true
+            self.analyzer = VLMAnalyzer(
+                self._model, self._processor,
+                self.config.analyzer_cfg, self.config.profiles,
+                device=self._device,
+            )
+            print(f"[VLM] Analyzer ready  profile={self.analyzer.profile_name}  "
+                  f"kv_reuse={self.analyzer.cfg.get('kv_reuse')}  "
+                  f"image_max_pixels={self.analyzer.cfg.get('image_max_pixels')}")
             self._initialized = True
             print(f"[VLM] Initialized: {self.config.model_name} on {self._device}")
             return True
@@ -191,11 +211,14 @@ class VLMCore:
                     "Then retry.  Without NF4 the 3B model needs ~7 GB bfloat16 "
                     "which exceeds the 6 GB VRAM budget."
                 )
+            # fp16 compute matches the fp16 non-quantized modules (torch_dtype
+            # below) and single quantization skips the double-dequant step:
+            # measured 10.1 -> 12.1 tok/s decode on the RTX 4050 for +0.15 GB.
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
+                bnb_4bit_use_double_quant=False,
             )
             print("[VLM] Using bitsandbytes NF4 4-bit quantization (announced)")
 
@@ -278,6 +301,9 @@ class VLMCore:
         frames: list[np.ndarray],
         frame_indices: list[int],
         context_prompt: str | None = None,
+        actors: list | None = None,
+        extra_context: str = "",
+        high_priority: bool = False,
     ) -> VLMOutput:
         if not frames:
             raise ValueError(
@@ -288,11 +314,29 @@ class VLMCore:
         last_frame = frames[-1]
         last_idx = frame_indices[-1] if frame_indices else 0
 
+        if self.analyzer is None:
+            raise RuntimeError(
+                "[VLM] Cannot run escalated pass: analyzer not created "
+                "(model not loaded).  Call initialize() first."
+            )
+
+        if context_prompt:
+            extra_context = f"{extra_context} {context_prompt}".strip()
+        max_pixels = (
+            int(self.analyzer.cfg.get("escalated_max_pixels", 401408))
+            if high_priority else None
+        )
+
         # Deliberately NOT wrapped in try/except: a failed escalated pass must
         # surface, not silently become an empty entity list.
-        detected_entities = self._run_model_inference(last_frame, context_prompt)
-        # _run_model_inference sets self._last_scene_description as a side effect.
-        scene_desc = self._last_scene_description
+        analysis = self.analyzer.analyze(
+            last_frame, actors, extra_context, max_pixels=max_pixels
+        )
+        detected_entities = analysis.to_entities()
+        self._last_scene_description = analysis.scene
+        print(f"[vlm] [{analysis.alert_level}] {analysis.scene}  "
+              f"({analysis.latency_s:.2f}s, kv_reused={analysis.timings.get('kv_reused')}, "
+              f"cached={analysis.cached})")
 
         confidence = (
             max(float(e["confidence"]) for e in detected_entities)
@@ -306,29 +350,38 @@ class VLMCore:
             priority_score=1.0,
             detected_entities=detected_entities,
             confidence=confidence,
-            scene_description=scene_desc,
+            scene_description=analysis.scene,
+            analysis=analysis,
         )
 
     # Prompt 1: natural language scene description — what the model ACTUALLY sees.
     # No constraints on vocabulary. Model describes freely in 1-2 sentences.
     SCENE_PROMPT = (
-        "You are a surveillance camera AI. Look at this image carefully and describe "
-        "in 1-2 sentences exactly what you see: the people, their actions, what they "
-        "are doing, any objects of interest, and anything unusual. Be specific and factual."
+        "You are a camera for flood and rescue monitoring. Describe in 2-3 short "
+        "sentences exactly what is visible: the place, people and what they are doing, "
+        "and any water. Only mention flooding or rescue if you can actually see "
+        "floodwater or someone in danger. If the scene is normal, just describe it."
     )
 
     # Prompt 2: structured entity extraction for downstream alerting logic.
     # The parser in _parse_entities_from_text expects exactly this format.
     ENTITY_PROMPT = (
-        "You are analyzing a surveillance frame. List only what you can actually see. "
-        "Respond with a JSON array and nothing else. Each element must be an object "
-        'with keys: "type" (one of: person, fall, fire, smoke, fight, gathering, '
-        'suspicious, object_left), "confidence" (a number 0.0-1.0 reflecting how '
-        'certain you are), and "description" (a short factual phrase). '
+        "You are analyzing a flood-monitoring camera frame. List only what you can "
+        "actually see. Respond with a JSON array and nothing else. Each element must be "
+        'an object with keys: "type" (one of: flood, rising_water, fast_current, '
+        "person_in_water, person_stranded, person_crossing, vehicle_in_water, "
+        "bridge_submerged, building_flooded, road_flooded, debris, rescue_activity, "
+        "fire, smoke, fall, other), "
+        '"confidence" (a number 0.0-1.0 reflecting how certain you are), and '
+        '"description" (a short factual phrase). '
         "If you see nothing of note, respond with []."
     )
 
-    def _run_model_inference(self, frame: np.ndarray, prompt: str | None = None) -> list[dict]:
+    def _run_model_inference_legacy(self, frame: np.ndarray, prompt: str | None = None) -> list[dict]:
+        """Old two-independent-pass path (scene, then entities; image encoded twice).
+
+        Kept only as the baseline for benchmarks/vlm_speed_bench.py.
+        """
         if self._model is None or self._processor is None:
             raise RuntimeError(
                 "[VLM] Cannot run inference: model/processor not loaded.  "
@@ -336,7 +389,8 @@ class VLMCore:
             )
 
         # --- Pass 1: Natural language scene description (what the model actually sees) ---
-        self._last_scene_description = self._run_single_prompt(frame, self.SCENE_PROMPT)
+        scene_prompt = self.SCENE_PROMPT
+        self._last_scene_description = self._run_single_prompt(frame, scene_prompt)
         print(f"[vlm] Scene: {self._last_scene_description}")
 
         # --- Pass 2: Structured entity extraction for alerting logic ---
@@ -354,7 +408,10 @@ class VLMCore:
             return []
 
     def _run_single_prompt(self, frame: np.ndarray, prompt: str) -> str:
-        """Run the model with a single text prompt on a frame. Returns raw text output."""
+        """Run the model with a single text prompt on a BGR frame. Returns raw text output."""
+        import cv2
+        # Frames in the pipeline are BGR (OpenCV); the processor expects RGB.
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         messages = [
             {
                 "role": "user",
@@ -497,6 +554,8 @@ class VLMManager:
         self._escalation_count = 0
         self._last_escalation_t = time.perf_counter()
         self._forced_interval_s = 15.0
+        # Detector priority at/above this escalates with the larger image budget.
+        self._ambiguous_high = 0.7
 
         self._ambient_outputs: list[VLMOutput] = []
         self._escalation_outputs: list[VLMOutput] = []
@@ -527,6 +586,8 @@ class VLMManager:
         frame: np.ndarray,
         frame_idx: int,
         detector_priority_score: float = 0.0,
+        actors: list | None = None,
+        extra_context: str = "",
     ) -> VLMOutput | None:
         """Check if this frame should escalate; if so run the model.
 
@@ -538,6 +599,7 @@ class VLMManager:
         should_escalate, reason = self.core.should_escalate(
             detector_priority_score,
             frame_idx,
+            ambiguous_high=self._ambiguous_high,
         )
 
         if not should_escalate:
@@ -552,7 +614,11 @@ class VLMManager:
         self._last_escalation_frame = frame_idx
         self._last_escalation_t = time.perf_counter()
 
-        output = self._handle_escalation(frame, frame_idx, reason)
+        output = self._handle_escalation(
+            frame, frame_idx, reason,
+            actors=actors, extra_context=extra_context,
+            high_priority=detector_priority_score >= self._ambiguous_high,
+        )
         if output:
             self._escalation_outputs.append(output)
 
@@ -563,6 +629,9 @@ class VLMManager:
         frame: np.ndarray,
         frame_idx: int,
         reason: str,
+        actors: list | None = None,
+        extra_context: str = "",
+        high_priority: bool = False,
     ) -> VLMOutput | None:
         n = self._context_frames
         context_frames = [f for f, i, _ in self._frame_buffer[-n:]]
@@ -576,6 +645,9 @@ class VLMManager:
                 context_frames,
                 context_indices,
                 context_prompt=None,
+                actors=actors,
+                extra_context=extra_context,
+                high_priority=high_priority,
             )
         except Exception as e:
             # Re-raise: the stage guard in main_loop.py handles this.

@@ -24,6 +24,13 @@ import numpy as np
 from vlm.config_paths import DEFAULT_VLM_CONFIG
 
 from vlm.core import VLMConfig, VLMManager, VLMOutput
+from vlm.analyzer import (
+    Actor,
+    SceneAnalysis,
+    TrackMotionHistory,
+    VLMAnalyzer,
+    actors_from_tracks,
+)
 from vlm.escalation import EscalationConfig, EscalationHandler, EscalationDecision
 from vlm.query_engine import QueryConfig, QueryEngine, OpenVocabWatcher
 
@@ -66,6 +73,40 @@ class VLMIntegration:
         self._vlm_event_table = str(integration_cfg.get("vlm_event_db_table", "vlm_events"))
         self._event_db_path: str | None = None
         self._db_conn: sqlite3.Connection | None = None
+
+        # Per-track motion history, fed every frame via update_tracks() and
+        # read by process_frame() when building actors for the analyzer.
+        # TrackMotionHistory guards its own state with a lock.
+        self.motion_history = TrackMotionHistory()
+        self._max_actors = int((self.vlm_config.analyzer_cfg or {}).get("max_actors", 8))
+
+    def update_tracks(self, tracks, t: float | None = None) -> None:
+        """Cheap per-frame hook: record track centres for motion descriptions."""
+        self.motion_history.update(tracks, t)
+
+    def set_profile(self, name: str) -> None:
+        """Switch analyzer profile (e.g. 'flood', 'generic'). Requires a loaded model."""
+        analyzer = self.vlm_manager.core.analyzer
+        if analyzer is None:
+            raise RuntimeError("[VLMIntegration] set_profile: analyzer not initialized")
+        analyzer.set_profile(name)
+
+    @staticmethod
+    def _context_from_events(events: list | None) -> str:
+        parts = []
+        for e in events or []:
+            if getattr(e, "event_type", "") != "FLOOD":
+                continue
+            d = getattr(e, "details", {}) or {}
+            wr, mr = d.get("water_ratio"), d.get("motion_ratio")
+            if wr is None:
+                continue
+            s = f"Water sensor: water-coloured region over {float(wr) * 100:.0f}% of view"
+            if mr is not None:
+                s += f", {float(mr) * 100:.0f}% of it moving"
+            parts.append(s + ".")
+            break   # one line is enough; events in one frame repeat the same sensor
+        return " ".join(parts)
 
     def set_frame_size(self, width: int, height: int) -> None:
         """Declare the live video source resolution before initialize()."""
@@ -164,6 +205,17 @@ class VLMIntegration:
             return
         try:
             import json
+            analysis = getattr(output, "analysis", None)
+            if analysis is not None:
+                payload = {
+                    "entities": output.detected_entities,
+                    "scene": analysis.scene,
+                    "alert_level": analysis.alert_level,
+                    "actors": analysis.actors,
+                    "hazards": analysis.hazards,
+                }
+            else:
+                payload = output.detected_entities
             self._db_conn.execute(
                 f"INSERT INTO {self._vlm_event_table} "
                 "(t_iso, frame_idx, reason, entities_json, confidence) VALUES (?,?,?,?,?)",
@@ -171,7 +223,7 @@ class VLMIntegration:
                     time.strftime("%Y-%m-%dT%H:%M:%S"),
                     output.frame_idx,
                     output.reasoning or "",
-                    json.dumps(output.detected_entities),
+                    json.dumps(payload),
                     round(output.confidence, 4),
                 ),
             )
@@ -185,9 +237,12 @@ class VLMIntegration:
         frame_idx: int,
         detector_events: list | None = None,
         tracks: list | None = None,
+        extra_context: str = "",
     ) -> VLMOutput | None:
         """Process one frame: update buffer; run escalated inference if triggered.
 
+        `tracks` (core.tracker.Track list) become numbered actors drawn on the
+        frame; FLOOD detector events add a water-sensor line to the prompt.
         Returns VLMOutput on escalation, None on non-escalated frames.
         """
         if not self._initialized:
@@ -197,8 +252,18 @@ class VLMIntegration:
 
         detector_priority = self._compute_priority_from_events(detector_events)
 
+        actors = None
+        if tracks:
+            actors = actors_from_tracks(
+                tracks, self.motion_history, frame.shape, self._max_actors
+            )
+        ctx = " ".join(
+            s for s in (self._context_from_events(detector_events), extra_context or "") if s
+        )
+
         output = self.vlm_manager.process_frame(
-            frame, frame_idx, detector_priority
+            frame, frame_idx, detector_priority,
+            actors=actors, extra_context=ctx,
         )
 
         if output is not None and output.is_escalated:
