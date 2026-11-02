@@ -82,11 +82,17 @@ class SendResult:
 class BitchatSender:
     """Sends MeshAlerts to the Bitchat VLM API on a phone."""
 
-    def __init__(self, base: str, gap_s: float = 6.0, timeout: float = 20.0):
+    def __init__(self, base: str, gap_s: float = 6.0, timeout: float = 20.0,
+                 image_settle_s: float = 14.0):
         self.base = base
         self.gap_s = gap_s
         self.timeout = timeout
+        # A 40-70 KB image takes several seconds to fragment over BLE. Sending the
+        # next message while it is still going out made some images or texts go
+        # missing, so wait this long after each image before the next message.
+        self.image_settle_s = image_settle_s
         self._last = 0.0
+        self._next_ok = 0.0
 
     # ---- connection ---------------------------------------------------------
     @classmethod
@@ -151,7 +157,7 @@ class BitchatSender:
 
     # ---- sending ------------------------------------------------------------
     def _wait(self):
-        dt = self.gap_s - (time.perf_counter() - self._last)
+        dt = max(self.gap_s - (time.perf_counter() - self._last), self._next_ok - time.perf_counter())
         if dt > 0:
             time.sleep(dt)
 
@@ -178,6 +184,8 @@ class BitchatSender:
             name += ".jpg"
         r = self._post("/send/image", files={"image": (name, jpg, "image/jpeg")})
         image_ok = bool(r is not None and r.status_code == 200)
+        if image_ok:
+            self._next_ok = time.perf_counter() + self.image_settle_s
         print(f"[mesh] image {name} {len(jpg) // 1024} KB -> {r.status_code if r is not None else 'failed'}")
         text_ok = []
         for part in alert.text_parts():
@@ -185,4 +193,6 @@ class BitchatSender:
             ok = bool(r is not None and r.status_code == 200)
             text_ok.append(ok)
             print(f"[mesh]   text {len(part)} chars -> {r.status_code if r is not None else 'failed'}")
+        # let the text go out before the next alert's image starts
+        self._next_ok = time.perf_counter() + self.gap_s + 2.0
         return SendResult(image_ok, text_ok)
