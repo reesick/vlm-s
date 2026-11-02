@@ -106,6 +106,10 @@ def main() -> int:
     ap.add_argument("--ip", default="172.20.10.4", help="phone IP (auto-found on this Wi-Fi if it moved)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-share", action="store_true")
+    ap.add_argument("--no-command-centre", action="store_true",
+                    help="do not send the extra IDX1|S copy the gateway forwards to the command centre")
+    ap.add_argument("--cc-url", default="", help="command-centre API base URL to set on the phone's gateway")
+    ap.add_argument("--cc-key", default="", help="gateway key for the command centre")
     ap.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = run until Q)")
     a = ap.parse_args()
 
@@ -117,6 +121,12 @@ def main() -> int:
         except ConnectionError as e:
             print(f"[mesh] {e}\n[mesh] continuing with on-screen descriptions only")
             share["on"] = False
+    if sender is not None:
+        if a.cc_url:
+            print(f"[cc] configuring phone gateway -> {a.cc_url}: {sender.configure_gateway(a.cc_url, a.cc_key)}")
+        g = sender.gateway_status()
+        print(f"[cc] gateway enabled={g.get('enabled')} url={g.get('api_url') or '-'} key_set={g.get('gateway_key_set')} "
+              f"online={g.get('online')} queued={g.get('queued')} last={g.get('last_result')}")
 
     from vlm.core import VLMConfig, VLMCore
     cfg = VLMConfig.from_yaml()
@@ -148,7 +158,7 @@ def main() -> int:
             except queue.Empty:
                 continue
             try:
-                if sender.send(alert).ok:
+                if sender.send(alert, command_centre=not a.no_command_centre).ok:
                     with lock:
                         state["sent"] += 1
             except Exception as e:  # noqa: BLE001

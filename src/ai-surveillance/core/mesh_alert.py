@@ -176,8 +176,32 @@ class BitchatSender:
             return r
         return None
 
-    def send(self, alert: MeshAlert) -> SendResult:
-        """Image first, then its text parts, each in its own rate window."""
+    def gateway_status(self) -> dict:
+        """Command-centre gateway state on the phone (GET /gateway)."""
+        try:
+            return requests.get(self.base + "/gateway", timeout=6).json()
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+
+    def configure_gateway(self, api_url: str, gateway_key: str = "", city_id: str = "") -> dict:
+        """Turn on the phone's command-centre link (POST /gateway)."""
+        body = {"enabled": True, "api_url": api_url}
+        if gateway_key:
+            body["gateway_key"] = gateway_key
+        if city_id:
+            body["city_id"] = city_id
+        return requests.post(self.base + "/gateway", json=body, timeout=10).json()
+
+    def send(self, alert: MeshAlert, command_centre: bool = True) -> SendResult:
+        """Image first, then its text parts, each in its own rate window.
+
+        Every message is a mesh broadcast with TTL 7: each phone that hears it
+        relays it (PacketRelayManager), so it hops to every participant.
+        command_centre: also send the description WITHOUT the visible tag; the
+        app wraps that as an IDX1|S| camera packet, which the gateway phone
+        forwards to the command centre (/api/v1/mesh/inbound) and Gov/Command
+        phones display. Needs the gateway enabled on a phone with internet.
+        """
         jpg = alert.jpeg()
         name = (alert.source or "alert").rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "alert.jpg"
         if not name.lower().endswith((".jpg", ".jpeg")):
@@ -193,6 +217,12 @@ class BitchatSender:
             ok = bool(r is not None and r.status_code == 200)
             text_ok.append(ok)
             print(f"[mesh]   text {len(part)} chars -> {r.status_code if r is not None else 'failed'}")
+        if command_centre:
+            cc = alert.headline()[:1200]
+            r = self._post("/send/text", json={"text": cc})
+            ok = bool(r is not None and r.status_code == 200)
+            text_ok.append(ok)
+            print(f"[mesh]   command-centre copy (IDX1|S) -> {r.status_code if r is not None else 'failed'}")
         # let the text go out before the next alert's image starts
         self._next_ok = time.perf_counter() + self.gap_s + 2.0
         return SendResult(image_ok, text_ok)
