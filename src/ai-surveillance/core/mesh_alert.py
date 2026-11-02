@@ -57,7 +57,10 @@ class MeshAlert:
             return chunks
         return [f"({i}/{len(chunks)}) {c}" for i, c in enumerate(chunks, 1)]
 
-    def jpeg(self, max_dim: int = 640, quality: int = 70) -> bytes:
+    def jpeg(self, max_dim: int = 480, quality: int = 60) -> bytes:
+        # Small on purpose: a mesh image is split into ~469-byte fragments and one
+        # lost fragment drops the whole image on that phone. 480 px / q60 is
+        # ~15-25 KB (~40-55 fragments) instead of ~150 at 640 px / q70.
         img = self.image
         h, w = img.shape[:2]
         s = min(1.0, max_dim / max(h, w))
