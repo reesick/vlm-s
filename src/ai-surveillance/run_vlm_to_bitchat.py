@@ -127,6 +127,11 @@ def main() -> int:
         g = sender.gateway_status()
         print(f"[cc] gateway enabled={g.get('enabled')} url={g.get('api_url') or '-'} key_set={g.get('gateway_key_set')} "
               f"online={g.get('online')} queued={g.get('queued')} last={g.get('last_result')}")
+        if not g.get("enabled") and not a.no_command_centre:
+            # Gateway off: the extra command-centre copy would only cost a rate window
+            # per alert (fewer live frames reach the mesh) and go nowhere.
+            print("[cc] gateway is off on the phone -> skipping the command-centre copy")
+            a.no_command_centre = True
 
     from vlm.core import VLMConfig, VLMCore
     cfg = VLMConfig.from_yaml()
