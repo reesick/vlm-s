@@ -14,11 +14,12 @@ AudiencePolicy):
     from the chat bubble.
   * category "UNSET" keeps it in the "All" chip (not filed under Fire/Gov).
   * Text up to ~1500 chars goes as ONE message (800 chars verified on the phone).
-  * The phone accepts one API message per rate window (5 s), so sends are
-    spaced by rate_limit_ms + 1 s.
+  * connect() sets the phone's rate limit to 0 (its async image check can drop
+    images silently); sends are still spaced by gap_s and image_settle_s.
 """
 from __future__ import annotations
 
+import os
 import socket
 import textwrap
 import time
@@ -57,19 +58,25 @@ class MeshAlert:
             return chunks
         return [f"({i}/{len(chunks)}) {c}" for i, c in enumerate(chunks, 1)]
 
-    def jpeg(self, max_dim: int = 480, quality: int = 60) -> bytes:
-        # Small on purpose: a mesh image is split into ~469-byte fragments and one
-        # lost fragment drops the whole image on that phone. 480 px / q60 is
-        # ~15-25 KB (~40-55 fragments) instead of ~150 at 640 px / q70.
+    def jpeg(self, max_dim: int = 360, quality: int = 60, target_kb: float = 4.0) -> bytes:
+        # Compressed hard on purpose: a mesh image travels as ~460-byte BLE
+        # fragments and one lost fragment drops the whole image on that phone.
+        # Quality steps down until the JPEG is <= target_kb (~4 KB = ~9 pieces).
         img = self.image
         h, w = img.shape[:2]
         s = min(1.0, max_dim / max(h, w))
         if s < 1.0:
             img = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        if not ok:
-            raise RuntimeError("JPEG encode failed")
-        return buf.tobytes()
+        best = None
+        for q in range(quality, 14, -8):
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, q,
+                                                 cv2.IMWRITE_JPEG_OPTIMIZE, 1])
+            if not ok:
+                raise RuntimeError("JPEG encode failed")
+            best = buf.tobytes()
+            if len(best) <= target_kb * 1024:
+                break
+        return best
 
 
 @dataclass
@@ -86,7 +93,7 @@ class BitchatSender:
     """Sends MeshAlerts to the Bitchat VLM API on a phone."""
 
     def __init__(self, base: str, gap_s: float = 6.0, timeout: float = 20.0,
-                 image_settle_s: float = 14.0):
+                 image_settle_s: float = 25.0):
         self.base = base
         self.gap_s = gap_s
         self.timeout = timeout
@@ -94,6 +101,10 @@ class BitchatSender:
         # next message while it is still going out made some images or texts go
         # missing, so wait this long after each image before the next message.
         self.image_settle_s = image_settle_s
+        # Caption on /send/image: the original app build needs it (else the sending
+        # phone shows "[Image]"). The fixed build (bitchat-fixed.apk) shows the photo
+        # itself and BROADCASTS the caption, so set BITCHAT_IMAGE_CAPTION=0 with it.
+        self.image_caption = os.environ.get("BITCHAT_IMAGE_CAPTION", "1") != "0"
         self._last = 0.0
         self._next_ok = 0.0
 
@@ -118,7 +129,16 @@ class BitchatSender:
 
     @classmethod
     def _make(cls, base: str, st: dict) -> "BitchatSender":
-        gap = (st.get("rate_limit_ms", 5000) or 5000) / 1000.0 + 1.0
+        # The phone checks its rate limit inside the async image job, so a "200 initiated"
+        # image can still be dropped silently. Turn the limit off; we pace sends ourselves.
+        try:
+            # The app reads missing booleans as false, so always send all three.
+            requests.post(base + "/settings", timeout=6, json={
+                "enabled": True, "silence_enabled": False, "rate_limit_ms": 0})
+            st["rate_limit_ms"] = 0
+        except requests.RequestException:
+            pass
+        gap = (st.get("rate_limit_ms", 5000) or 0) / 1000.0 + 2.0
         print(f"[mesh] {base}  api_enabled={st.get('api_enabled')}  peers={st.get('peers_count')}  gap={gap:.1f}s")
         if st.get("api_enabled") is False:
             raise ConnectionError("phone reachable but 'Accept camera alerts' is off")
@@ -209,11 +229,19 @@ class BitchatSender:
         name = (alert.source or "alert").rsplit("\\", 1)[-1].rsplit("/", 1)[-1] or "alert.jpg"
         if not name.lower().endswith((".jpg", ".jpeg")):
             name += ".jpg"
-        r = self._post("/send/image", files={"image": (name, jpg, "image/jpeg")})
+        # The installed app shows an API-sent image on the sending phone as the text
+        # "[Image]" unless a caption is given (caption ?: "[Image]", local only, not
+        # broadcast). Give it the VLM description so that phone shows real content.
+        caption = alert.headline()[:300]
+        use_caption = self.image_caption and alert.text.strip()
+        r = self._post("/send/image", files={"image": (name, jpg, "image/jpeg")},
+                       data={"caption": caption} if use_caption else None)
         image_ok = bool(r is not None and r.status_code == 200)
         if image_ok:
-            # settle time scales with size: ~4 s + 1 s per 5 KB (a 6 KB frame -> ~5 s)
-            self._next_ok = time.perf_counter() + min(self.image_settle_s, 4.0 + len(jpg) / 5120)
+            # Over a relay hop the image arrives seconds after the receiver shows its
+            # placeholder, while text is instant. Wait ~8 s + 1 s per KB so the text
+            # lands after its picture and the next image doesn't queue behind it.
+            self._next_ok = time.perf_counter() + min(self.image_settle_s, 8.0 + len(jpg) / 1024)
         print(f"[mesh] image {name} {len(jpg) // 1024} KB -> {r.status_code if r is not None else 'failed'}")
         text_ok = []
         for part in alert.text_parts():
