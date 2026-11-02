@@ -77,11 +77,46 @@ object VlmMessageHandler {
         }
     }
 
+    /**
+     * Category a VLM brief is broadcast under, so the alert chips can sort it: fire and
+     * smoke go to Fire, casualties to Ambulance, collapse/flood/violence to Gov.
+     */
+    fun categoryFor(text: String): com.bitchat.android.model.Role =
+        when (com.bitchat.android.services.SyncBundleBuilder.hazardKind(text)) {
+            "fire", "smoke" -> com.bitchat.android.model.Role.FIRE
+            "medical" -> com.bitchat.android.model.Role.AMBULANCE
+            "collapse", "flood", "assault" -> com.bitchat.android.model.Role.GOV
+            else -> com.bitchat.android.model.Role.UNSET
+        }
+
+    /**
+     * A broadcast VLM brief always carries an IDX1 `S` (sensor) packet, the same format the
+     * camera bridge sends. Phones show `S` packets only to Gov and Command
+     * ([com.bitchat.android.services.AudiencePolicy]); a gateway forwards it to the command
+     * centre, which keeps camera-only incidents on the dashboard. Unsigned ("-"): the API
+     * then treats it as unverified, like any unsigned packet.
+     */
+    fun asSensorPacket(text: String, messageId: String): String {
+        if (text.contains("IDX1|")) return text
+        val body = org.json.JSONObject()
+        body.put("id", messageId)
+        body.put("n", "vlm-phone")
+        body.put("k", com.bitchat.android.services.SyncBundleBuilder.hazardKind(text) ?: "observation")
+        com.bitchat.android.net.LastFix.cached?.let { (la, lo) ->
+            body.put("la", Math.round(la * 100_000) / 100_000.0)
+            body.put("lo", Math.round(lo * 100_000) / 100_000.0)
+        }
+        body.put("x", text.take(200))
+        body.put("t", System.currentTimeMillis() / 1000)
+        return "$text IDX1|S|$body|-"
+    }
+
     fun sendTextMessage(
         context: Context,
         text: String,
         peerId: String? = null,
-        channel: String? = null
+        channel: String? = null,
+        category: com.bitchat.android.model.Role? = null
     ): VlmResult {
         VlmSettingsManager.initialize(context)
 
@@ -131,17 +166,20 @@ object VlmMessageHandler {
                 Log.i(TAG, "Sent private message to $resolvedPeerId")
                 VlmResult.Success(messageId, null)
             } else {
-                mesh.sendMessage(text, emptyList(), resolvedChannel)
+                val cat = category ?: categoryFor(text)
+                val wire = asSensorPacket(text, messageId)
+                mesh.sendMessage(wire, emptyList(), resolvedChannel, cat)
                 updateLastSendTime()
                 
                 val message = BitchatMessage(
                     id = messageId,
                     sender = nickname,
                     senderPeerID = null,
-                    content = text,
+                    content = wire,
                     timestamp = Date(),
                     isRelay = false,
-                    deliveryStatus = DeliveryStatus.Sent
+                    deliveryStatus = DeliveryStatus.Sent,
+                    category = cat
                 )
                 if (resolvedChannel != null) {
                     AppStateStore.addChannelMessage(resolvedChannel, message)
@@ -150,6 +188,9 @@ object VlmMessageHandler {
                 }
                 
                 Log.i(TAG, "Sent broadcast message${resolvedChannel?.let { " to channel $it" } ?: ""}")
+                // A report this phone's user sent should be forwarded by this phone too,
+                // not only by the neighbours (the mesh does not echo our own messages).
+                try { IndradhanuGateway.onLocalSend(wire) } catch (_: Exception) { }
                 VlmResult.Success(messageId, null)
             }
         } catch (e: Exception) {
@@ -227,7 +268,6 @@ object VlmMessageHandler {
                     AppStateStore.addPublicMessage(message)
                 }
                 if (!caption.isNullOrBlank()) {
-                    // The file packet carries no caption, so peers get it as a follow-up text.
                     mesh.sendMessage(caption, emptyList(), resolvedChannel)
                     val captionMsg = localTextMessage("$messageId-caption", nickname, caption, resolvedChannel)
                     if (resolvedChannel != null) {
@@ -248,62 +288,30 @@ object VlmMessageHandler {
         }
     }
 
-    /**
-     * Local echo of an image sent through the VLM API. The chat renders
-     * BitchatMessageType.Image by decoding the file at `content`, so the bytes
-     * are written to app storage first (same place incoming images go).
-     * Falls back to a text echo only if the file cannot be written.
-     */
+    /** Local echo of an API-sent image: write bytes to app storage so the chat renders the picture. */
     private fun localImageMessage(
-        context: Context,
-        messageId: String,
-        nickname: String,
-        fileName: String,
-        imageBytes: ByteArray,
-        caption: String?,
-        channel: String?
+        context: Context, messageId: String, nickname: String, fileName: String,
+        imageBytes: ByteArray, caption: String?, channel: String?
     ): BitchatMessage {
         val path = try {
             val dir = File(context.cacheDir, "images/outgoing").apply { mkdirs() }
-            val out = File(dir, fileName)
-            out.writeBytes(imageBytes)
-            out.absolutePath
+            File(dir, fileName).apply { writeBytes(imageBytes) }.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "Failed to store VLM image for local display: ${e.message}", e)
             null
         }
         return if (path != null) {
-            BitchatMessage(
-                id = messageId,
-                sender = nickname,
-                senderPeerID = null,
-                content = path,
-                type = BitchatMessageType.Image,
-                timestamp = Date(),
-                isRelay = false,
-                deliveryStatus = DeliveryStatus.Sent,
-                channel = channel
-            )
+            BitchatMessage(id = messageId, sender = nickname, senderPeerID = null, content = path,
+                type = BitchatMessageType.Image, timestamp = Date(), isRelay = false,
+                deliveryStatus = DeliveryStatus.Sent, channel = channel)
         } else {
             localTextMessage(messageId, nickname, caption ?: "[Image]", channel)
         }
     }
 
-    private fun localTextMessage(
-        messageId: String,
-        nickname: String,
-        text: String,
-        channel: String?
-    ): BitchatMessage = BitchatMessage(
-        id = messageId,
-        sender = nickname,
-        senderPeerID = null,
-        content = text,
-        timestamp = Date(),
-        isRelay = false,
-        deliveryStatus = DeliveryStatus.Sent,
-        channel = channel
-    )
+    private fun localTextMessage(messageId: String, nickname: String, text: String, channel: String?): BitchatMessage =
+        BitchatMessage(id = messageId, sender = nickname, senderPeerID = null, content = text,
+            timestamp = Date(), isRelay = false, deliveryStatus = DeliveryStatus.Sent, channel = channel)
 
     private suspend fun sendPrivateImage(
         mesh: MeshService,

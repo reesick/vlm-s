@@ -8,7 +8,9 @@ import com.bitchat.android.ui.theme.BitchatFontFamily
 
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.rounded.Map as MapIcon
 import androidx.compose.animation.*
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -16,6 +18,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -59,7 +62,10 @@ import com.bitchat.android.ui.theme.BitchatMotion
  * - ChatUIUtils: Utility functions for formatting and colors
  */
 @Composable
-fun ChatScreen(viewModel: ChatViewModel) {
+fun ChatScreen(
+    viewModel: ChatViewModel,
+    shell: com.bitchat.android.shell.ShellControls? = null,
+) {
     val colorScheme = MaterialTheme.colorScheme
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val connectedPeers by viewModel.connectedPeers.collectAsStateWithLifecycle()
@@ -89,6 +95,27 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val subscribedRoles by viewModel.subscribedRoles.collectAsStateWithLifecycle()
     val peerRoles by viewModel.peerRoles.collectAsStateWithLifecycle()
 
+    // Everything with a position: the node registry plus geo-tagged broadcasts. Collected
+    // (not read once) so markers appear and update while the map is open.
+    val mapShelters by viewModel.shelters.collectAsStateWithLifecycle()
+    val mapPublicMessages by viewModel.publicMessages.collectAsStateWithLifecycle()
+    // A crew's unit id comes from the online app (see shell/Handoff.kt); with it, the
+    // command centre's dispatch for this unit becomes "Your task" on the map.
+    val handoff by com.bitchat.android.shell.Handoff.state.collectAsStateWithLifecycle()
+    val myUnitId = handoff.unitId
+    val mapEntities = remember(mapShelters, mapPublicMessages, nickname, localRole, myUnitId) {
+        val visible = mapPublicMessages.filter {
+            com.bitchat.android.services.AudiencePolicy.visibleTo(localRole, it)
+        }
+        com.bitchat.android.ui.map.buildMapEntities(
+            mapShelters, visible, nickname,
+            myUnitId = myUnitId,
+            seeAllTasks = localRole == com.bitchat.android.model.Role.GOV ||
+                localRole == com.bitchat.android.model.Role.COMMAND,
+        )
+    }
+    val mapSosCount = remember(mapEntities) { mapEntities.count { it.isCritical } }
+
     var messageText by remember { mutableStateOf(TextFieldValue("")) }
     var showPasswordPrompt by remember { mutableStateOf(false) }
     var showPasswordDialog by remember { mutableStateOf(false) }
@@ -97,6 +124,12 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var showLocationNotesSheet by remember { mutableStateOf(false) }
     var showShelterSheet by remember { mutableStateOf(false) }
     var showMapSheet by remember { mutableStateOf(false) }
+    // Which entity the map opens on (from a message's "View on map"), and the destination the
+    // person is being guided to. Both outlive the map being closed, so going back to the chat
+    // mid-guidance and reopening the map resumes where it was.
+    var mapFocusId by rememberSaveable { mutableStateOf<String?>(null) }
+    var mapGuidanceId by rememberSaveable { mutableStateOf<String?>(null) }
+    var mapAdHocEntity by remember { mutableStateOf<com.bitchat.android.ui.map.MapEntity?>(null) }
     var showUserSheet by remember { mutableStateOf(false) }
     var selectedUserForSheet by remember { mutableStateOf("") }
     var selectedMessageForSheet by remember { mutableStateOf<BitchatMessage?>(null) }
@@ -105,13 +138,56 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var initialViewerIndex by remember { mutableStateOf(0) }
     var forceScrollToBottom by remember { mutableStateOf(false) }
     var isScrolledUp by remember { mutableStateOf(false) }
+    var showReportSheet by remember { mutableStateOf(false) }
+    var showSosSheet by remember { mutableStateOf(false) }
+    val session by com.bitchat.android.account.Account.session.collectAsStateWithLifecycle()
+
+    // Pick up where the online app left off: the route being followed, a half-written
+    // message, the last position. Read once each time the mesh side comes to the front.
+    LaunchedEffect(Unit) {
+        val h = com.bitchat.android.shell.Handoff.state.value
+        if (h.lat != null && h.lng != null) com.bitchat.android.net.LastFix.remember(h.lat, h.lng)
+        val fresh = System.currentTimeMillis() - h.updatedAt < 6 * 60 * 60 * 1000L
+        if (fresh && h.navigating && h.hasDestination) {
+            val entity = com.bitchat.android.ui.map.MapEntity(
+                id = HANDOFF_DEST_ID,
+                kind = if (h.destKind == "task") com.bitchat.android.ui.map.MapEntityKind.TASK
+                else com.bitchat.android.ui.map.MapEntityKind.SHELTER,
+                lat = h.destLat!!, lon = h.destLng!!,
+                title = h.destName ?: "Destination",
+                body = h.destKind?.let { "Guidance from the command centre: $it" },
+                reporter = "Command centre",
+                reporterRole = com.bitchat.android.model.Role.COMMAND,
+                timestampMs = h.updatedAt, verified = true, status = null, capacity = null,
+                peerID = null, messageId = null, isOwn = false,
+            )
+            mapAdHocEntity = entity
+            mapFocusId = entity.id
+            mapGuidanceId = entity.id
+            showMapSheet = true
+        }
+    }
+
+    // A new dispatch for this crew becomes the guidance target, unless the crew is already
+    // being guided somewhere: the control room's instruction is the default, not an override.
+    val myTask = if (myUnitId != null) {
+        mapEntities.lastOrNull { it.kind == com.bitchat.android.ui.map.MapEntityKind.TASK }
+    } else null
+    LaunchedEffect(myTask?.id) {
+        val task = myTask ?: return@LaunchedEffect
+        if (mapGuidanceId == null || mapEntities.none { it.id == mapGuidanceId }) {
+            mapGuidanceId = task.id
+        }
+    }
 
     LaunchedEffect(selectedPrivatePeer) {
-        messageText = TextFieldValue(
-            selectedPrivatePeer
-                ?.let(viewModel::conversationDraft)
-                .orEmpty()
-        )
+        // The public timeline's draft is shared with the online app (see shell/Handoff.kt).
+        val text = if (selectedPrivatePeer != null) {
+            viewModel.conversationDraft(selectedPrivatePeer)
+        } else {
+            com.bitchat.android.shell.Handoff.state.value.draft.orEmpty()
+        }
+        messageText = TextFieldValue(text, TextRange(text.length))
     }
 
     // Show password dialog when needed
@@ -288,32 +364,26 @@ if (isMeshTimeline) {
               Column(
                   modifier = Modifier
                       .fillMaxWidth()
-                      .padding(top = 88.dp)
+                      .padding(top = statusBarHeight + headerHeight)
               ) {
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .padding(horizontal = 12.dp, vertical = 4.dp),
-                      horizontalArrangement = Arrangement.spacedBy(8.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      androidx.compose.material3.TextButton(onClick = { showShelterSheet = true }) {
-                          androidx.compose.material3.Text("Shelters ${if (viewModel.shelters.value.isNotEmpty()) "(${viewModel.shelters.value.size})" else ""}")
-                      }
-                      androidx.compose.material3.TextButton(onClick = { showMapSheet = true }) {
-                          androidx.compose.material3.Text("Map")
-                      }
-                  }
-                  RoleFilterRow(
-                      selectedRoles = subscribedRoles,
-                      availableRoles = setOf(
-                          com.bitchat.android.model.Role.CIVILIAN,
-                          com.bitchat.android.model.Role.AMBULANCE,
-                          com.bitchat.android.model.Role.FIRE,
-                          com.bitchat.android.model.Role.GOV
-                      ),
+                  com.bitchat.android.ui.home.ShellBanner(controls = shell, peerCount = connectedPeers.size)
+                  com.bitchat.android.ui.home.QuickActionBar(
+                      sosCount = mapSosCount,
+                      placesCount = mapShelters.size,
+                      onSos = { showSosSheet = true },
+                      onReport = { showReportSheet = true },
+                      onMap = {
+                          mapFocusId = null
+                          mapAdHocEntity = null
+                          showMapSheet = true
+                      },
+                      onPlaces = { showShelterSheet = true },
+                  )
+                  com.bitchat.android.ui.home.RoleChips(
+                      selected = subscribedRoles,
+                      roles = com.bitchat.android.model.Role.filterOrder,
                       onToggle = viewModel::toggleSubscribedRole,
-                      onClearAll = viewModel::clearSubscribedRoles
+                      onAll = viewModel::clearSubscribedRoles,
                   )
               }
           }
@@ -323,6 +393,8 @@ if (isMeshTimeline) {
             // list, rather than in a Column above it, because the conversation has to scroll
             // underneath the translucent bars. Their heights are reserved as list padding.
             var notesStripHeight by remember { mutableStateOf(0.dp) }
+            // On the mesh timeline the quick actions above already clear the header.
+            val listTopInset = if (isMeshTimeline) 0.dp else statusBarHeight + headerHeight
             val showNotesStrip =
                 isMeshTimeline && nearbyNotesRevealed && nearbyNotes.isNotEmpty()
 
@@ -334,7 +406,7 @@ if (isMeshTimeline) {
                 modifier = Modifier.fillMaxSize(),
                 conversationKey = conversationKey,
                 contentPadding = PaddingValues(
-                    top = statusBarHeight + headerHeight +
+                    top = listTopInset +
                         (if (showNotesStrip) notesStripHeight else 0.dp),
                     bottom = composerHeight
                 ),
@@ -386,6 +458,17 @@ if (isMeshTimeline) {
                     viewerImagePaths = allImagePaths
                     initialViewerIndex = initialIndex
                     showFullScreenImageViewer = true
+                },
+                onViewLocation = { message ->
+                    val id = "msg:${message.id}"
+                    // A geo-tagged message outside the mesh timeline (a channel, a geohash) is
+                    // not in the registry-backed list, so the map is handed it directly.
+                    mapAdHocEntity = if (mapEntities.any { it.id == id }) null else {
+                        com.bitchat.android.ui.map.buildMapEntities(emptyList(), listOf(message), nickname)
+                            .firstOrNull()
+                    }
+                    mapFocusId = id
+                    showMapSheet = true
                 }
             )
 
@@ -395,7 +478,7 @@ if (isMeshTimeline) {
                     onClick = { showLocationNotesSheet = true },
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = statusBarHeight + headerHeight)
+                        .padding(top = listTopInset)
                         .onSizeChanged { size ->
                             notesStripHeight = with(density) { size.height.toDp() }
                         },
@@ -419,6 +502,9 @@ if (isMeshTimeline) {
         messageText = messageText,
         onMessageTextChange = { newText: TextFieldValue ->
             messageText = newText
+            if (selectedPrivatePeer == null) {
+                com.bitchat.android.shell.Handoff.update { it.copy(draft = newText.text.ifBlank { null }) }
+            }
             viewModel.setConversationDraft(selectedPrivatePeer, newText.text)
             viewModel.updateCommandSuggestions(newText.text)
             viewModel.updateMentionSuggestions(newText.text)
@@ -431,6 +517,7 @@ if (isMeshTimeline) {
                         if (acc) {
                             messageText = TextFieldValue("")
                             viewModel.setConversationDraft(selectedPrivatePeer, "")
+                            com.bitchat.android.shell.Handoff.update { it.copy(draft = null) }
                             forceScrollToBottom = !forceScrollToBottom
                         }
                     }
@@ -442,6 +529,7 @@ if (isMeshTimeline) {
                 if (acc) {
                     messageText = TextFieldValue("")
                     viewModel.setConversationDraft(selectedPrivatePeer, "")
+                    com.bitchat.android.shell.Handoff.update { it.copy(draft = null) }
                     forceScrollToBottom = !forceScrollToBottom
                 }
             }
@@ -451,6 +539,7 @@ if (isMeshTimeline) {
                 if (acc) {
                     messageText = TextFieldValue("")
                     viewModel.setConversationDraft(selectedPrivatePeer, "")
+                    com.bitchat.android.shell.Handoff.update { it.copy(draft = null) }
                     forceScrollToBottom = !forceScrollToBottom
                 }
             }
@@ -547,6 +636,60 @@ if (isMeshTimeline) {
                 }
             }
         }
+
+        // The map: full screen, over the conversation, in the same window so it can be
+        // entered and left without a dialog's transition. Always in the dark visual language.
+        AnimatedVisibility(
+            visible = showMapSheet,
+            enter = fadeIn(tween(BitchatMotion.EMPHASIZED_MS)) +
+                scaleIn(tween(BitchatMotion.EMPHASIZED_MS), initialScale = 0.98f),
+            exit = fadeOut(tween(BitchatMotion.STANDARD_MS)),
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+        ) {
+            val adHoc = mapAdHocEntity
+            val entitiesForMap = remember(mapEntities, adHoc) {
+                if (adHoc == null || mapEntities.any { it.id == adHoc.id }) mapEntities else mapEntities + adHoc
+            }
+            com.bitchat.android.ui.map.MapThemeScope {
+                com.bitchat.android.ui.map.EmergencyMapScreen(
+                    entities = entitiesForMap,
+                    localRole = localRole,
+                    meshPeerCount = connectedPeers.size,
+                    initialFocusId = mapFocusId,
+                    guidanceTargetId = mapGuidanceId,
+                    onGuidanceTargetChange = { id ->
+                        mapGuidanceId = id
+                        // Tell the online app where this person is headed, so it carries on.
+                        val target = entitiesForMap.firstOrNull { it.id == id }
+                        if (target == null) {
+                            com.bitchat.android.shell.Handoff.clearDestination()
+                        } else {
+                            com.bitchat.android.shell.Handoff.update {
+                                it.copy(
+                                    destName = target.title, destKind = target.kind.label.lowercase(),
+                                    destLat = target.lat, destLng = target.lon, navigating = true,
+                                    intent = it.intent.takeIf { _ -> target.id == HANDOFF_DEST_ID },
+                                )
+                            }
+                        }
+                    },
+                    onOpenInChat = { showMapSheet = false },
+                    onMessagePeer = { entity ->
+                        showMapSheet = false
+                        entity.peerID?.let { peerID ->
+                            if (peerID.startsWith("nostr:")) {
+                                viewModel.startGeohashDMByShortId(peerID.removePrefix("nostr:"))
+                            } else {
+                                viewModel.showPrivateChatSheet(peerID)
+                            }
+                        }
+                    },
+                    onDismiss = { showMapSheet = false }
+                )
+            }
+        }
     }
 
     // Full-screen image viewer - separate from other sheets to allow image browsing without navigation
@@ -603,6 +746,26 @@ if (isMeshTimeline) {
         onMeshPeerListDismiss = viewModel::hideMeshPeerList,
     )
 
+    if (showReportSheet) {
+        com.bitchat.android.ui.home.ReportSheet(
+            isCrew = session?.isFieldCrew == true || localRole in setOf(
+                com.bitchat.android.model.Role.AMBULANCE,
+                com.bitchat.android.model.Role.FIRE,
+                com.bitchat.android.model.Role.GOV,
+            ),
+            initialDraft = "",
+            onSendReport = { category, text -> viewModel.sendMeshReport(category, text) },
+            onSendStatus = { kind, note -> viewModel.sendCrewStatus(kind, note) },
+            onDismiss = { showReportSheet = false },
+        )
+    }
+    if (showSosSheet) {
+        com.bitchat.android.ui.home.SosSheet(
+            onSend = { msg -> viewModel.sendSOS(msg) { if (it) forceScrollToBottom = !forceScrollToBottom } },
+            onDismiss = { showSosSheet = false },
+        )
+    }
+
     ShelterSheet(
         isPresented = showShelterSheet,
         shelters = viewModel.shelters.value,
@@ -613,31 +776,12 @@ if (isMeshTimeline) {
         },
         onOpenMap = {
             showShelterSheet = false
+            mapFocusId = null
+            mapAdHocEntity = null
             showMapSheet = true
         },
         onDismiss = { showShelterSheet = false }
     )
-    if (showMapSheet) {
-        val shelters = viewModel.shelters.value
-        val publicMsgs = viewModel.publicMessages.value
-        val incidents = publicMsgs.mapNotNull { msg ->
-            val geo = com.bitchat.android.ui.map.parseGeoTag(msg.content) ?: return@mapNotNull null
-            com.bitchat.android.ui.map.IncidentMarker(
-                id = msg.id,
-                lat = geo.first,
-                lon = geo.second,
-                role = msg.category,
-                label = "${msg.sender}: ${msg.content.take(40)}"
-            )
-        }
-        com.bitchat.android.ui.map.OfflineMapSheet(
-            shelters = shelters,
-            incidents = incidents,
-            ownPosition = null,
-            onDismiss = { showMapSheet = false }
-        )
-    }
-
     legacyPrivateMediaConsent?.let { request ->
         AlertDialog(
             onDismissRequest = { viewModel.cancelLegacyPrivateMedia(request.requestId) },
@@ -666,6 +810,9 @@ if (isMeshTimeline) {
     }
 }
 
+/** Map id of the destination handed over by the online app. */
+private const val HANDOFF_DEST_ID = "handoff:dest"
+
 @Composable
 private fun NearbyNotesStrip(
     noteCount: Int,
@@ -685,7 +832,7 @@ private fun NearbyNotesStrip(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "📍 " + if (noteCount == 1) {
+                text = if (noteCount == 1) {
                     stringResource(R.string.nearby_notes_one)
                 } else {
                     stringResource(R.string.nearby_notes_many, noteCount)
@@ -695,10 +842,11 @@ private fun NearbyNotesStrip(
                 fontFamily = BitchatFontFamily,
                 fontSize = 12.sp,
             )
-            Text(
-                text = "›",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 18.sp,
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
             )
         }
     }

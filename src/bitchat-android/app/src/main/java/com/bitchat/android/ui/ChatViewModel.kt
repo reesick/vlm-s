@@ -460,6 +460,64 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * A hazard report over the mesh: readable words plus an IDX1 `R` packet, the same packet the
+     * Indradhanu PWA sends in mesh mode. Any phone with internet forwards it to the command
+     * centre, where it enters the same intake as a report typed online. [kind] is a command
+     * centre category id when the person picked one ("fire", "flooded_road"), else null and
+     * the words are read there.
+     */
+    fun sendMeshReport(kind: String?, text: String, onAccepted: (Boolean) -> Unit = {}) {
+        val words = text.trim()
+        if (words.isEmpty()) { onAccepted(false); return }
+        viewModelScope.launch {
+            val packet = buildIdx1Packet("R", kind, words, unit = null)
+            sendMessage(packet, onAccepted)
+            try { com.bitchat.android.vlm.IndradhanuGateway.onLocalSend(packet) } catch (_: Exception) { }
+        }
+    }
+
+    /**
+     * A field crew's status over the mesh (IDX1 `F`): "route_blocked" here, or "accepted",
+     * "on_site", "complete" for their task. The unit id comes from the online app when the crew
+     * last used it; without it the command centre still records the note.
+     */
+    fun sendCrewStatus(kind: String, note: String, onAccepted: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val unit = com.bitchat.android.shell.Handoff.state.value.unitId
+            val words = note.trim().ifEmpty {
+                when (kind) {
+                    "route_blocked" -> "Road blocked here"
+                    "on_site" -> "Crew on site"
+                    "accepted" -> "Crew accepted the task"
+                    "complete" -> "Task complete"
+                    else -> kind
+                }
+            }
+            val packet = buildIdx1Packet("F", kind, words, unit)
+            sendMessage(packet, onAccepted)
+            try { com.bitchat.android.vlm.IndradhanuGateway.onLocalSend(packet) } catch (_: Exception) { }
+        }
+    }
+
+    private suspend fun buildIdx1Packet(type: String, kind: String?, words: String, unit: String?): String {
+        val coords = currentLocation() ?: com.bitchat.android.net.LastFix.cached
+        coords?.let { com.bitchat.android.net.LastFix.remember(it.first, it.second) }
+        val body = org.json.JSONObject()
+        body.put("id", "${type.lowercase()}-${System.currentTimeMillis().toString(36)}")
+        body.put("n", (state.getNicknameValue() ?: "mesh").take(40))
+        kind?.let { body.put("k", it) }
+        unit?.let { body.put("u", it) }
+        coords?.let { (la, lo) ->
+            body.put("la", Math.round(la * 100_000) / 100_000.0)
+            body.put("lo", Math.round(lo * 100_000) / 100_000.0)
+        }
+        body.put("x", words.take(280))
+        body.put("t", System.currentTimeMillis() / 1000)
+        val geo = coords?.let { (la, lo) -> " geo:%.5f,%.5f".format(java.util.Locale.US, la, lo) } ?: ""
+        return "${words.take(200)}$geo IDX1|$type|$body|-"
+    }
+
     /** Append the sender's current GPS to an outgoing broadcast (composer 📍 toggle). */
     fun sendBroadcastWithGeotag(
         content: String,
@@ -539,16 +597,21 @@ class ChatViewModel(
             } } catch (_: Exception) { }
         }
         viewModelScope.launch {
-            try { com.bitchat.android.services.AppStateStore.publicMessages
-                .combine(state.subscribedRoles) { msgs, subs ->
+            try { combine(
+                com.bitchat.android.services.AppStateStore.publicMessages,
+                state.subscribedRoles,
+                state.localRole,
+            ) { all, subs, role ->
+                    // Camera/VLM detections are for Gov and Command phones only.
+                    val msgs = all.filter { com.bitchat.android.services.AudiencePolicy.visibleTo(role, it) }
                     // Local client-side role filter: show everything when the subscription set is
                     // empty ("All"), otherwise pass messages whose category matches a subscribed
                     // role or whose category is UNSET (legacy / no role declared). Channel
                     // messages are routed through their own state and never filtered here.
+                    // Selecting chips is a sort by who is speaking: only those
+                    // categories are shown ("All" clears the selection).
                     if (subs.isEmpty()) msgs else msgs.filter { msg ->
-                        msg.channel != null ||
-                            msg.category == com.bitchat.android.model.Role.UNSET ||
-                            msg.category in subs
+                        msg.channel != null || msg.category in subs
                     }
                 }
                 .collect { msgs ->
@@ -591,7 +654,14 @@ class ChatViewModel(
             } } catch (_: Exception) { }
         }
         viewModelScope.launch {
-            try { com.bitchat.android.services.AppStateStore.channelMessages.collect { byChannel ->
+            try { combine(
+                com.bitchat.android.services.AppStateStore.channelMessages,
+                state.localRole,
+            ) { byChannel, role ->
+                byChannel.mapValues { (_, msgs) ->
+                    msgs.filter { com.bitchat.android.services.AudiencePolicy.visibleTo(role, it) }
+                }
+            }.collect { byChannel ->
                 // Replace with store snapshot
                 state.setChannelMessages(byChannel)
             } } catch (_: Exception) { }
@@ -682,6 +752,8 @@ class ChatViewModel(
         try { meshService.subscribedRolesProvider = subscribedRolesThunk } catch (_: Exception) { }
         try { com.bitchat.android.wifiaware.WifiAwareController.getService()?.roleProvider = roleThunk } catch (_: Exception) { }
         try { com.bitchat.android.wifiaware.WifiAwareController.getService()?.subscribedRolesProvider = subscribedRolesThunk } catch (_: Exception) { }
+        // Command centre link (idempotent; the foreground service starts it too).
+        try { com.bitchat.android.vlm.IndradhanuGateway.initialize(getApplication()) } catch (_: Exception) { }
 
         // Load data
         val (joinedChannels, protectedChannels) = channelManager.loadChannelData()

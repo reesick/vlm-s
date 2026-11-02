@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- TODO: Chinese (Traditional) translations -->
-    <!-- Machine-translated (Claude) — pending native-speaker review. Also corrected Simplified->Traditional script errors in verify_*/fingerprint_* strings. -->
+    <!-- Machine-translated — pending native-speaker review. Also corrected Simplified->Traditional script errors in verify_*/fingerprint_* strings. -->
   <plurals name="location_notes_title">
     <item quantity="one">#%1$s ± 1 • %2$d 則筆記</item>
     <item quantity="other">#%1$s ± 1 • %2$d 則筆記</item>

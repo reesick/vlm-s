@@ -109,7 +109,21 @@ class MeshForegroundService : Service() {
         createChannel()
 
         VlmSettingsManager.initialize(applicationContext)
-        startVlmApiServiceIfNeeded()
+        // Start/stop the camera API whenever "Accept camera alerts" or the port changes.
+        // Before, it was only checked here once, so enabling the toggle after the
+        // service was already running never opened the port until a full app restart.
+        scope.launch {
+            VlmSettingsManager.settings
+                .map { it.enabled to it.httpPort }
+                .distinctUntilChanged()
+                .collect { (enabled, _) ->
+                    stopVlmApiService()
+                    if (enabled) startVlmApiServiceIfNeeded()
+                }
+        }
+        // Command centre link: push when online, listen for alerts, cache centres + routes.
+        // Idle until the Civilization Bridge sheet has sync on and a URL set.
+        try { com.bitchat.android.vlm.IndradhanuGateway.initialize(applicationContext) } catch (_: Exception) { }
 
         // Civilization bridge: monitor real internet connectivity and schedule an
         // incident/shelter flush whenever it returns. Disabled by default — the
@@ -122,6 +136,7 @@ class MeshForegroundService : Service() {
                     .collect { online ->
                         if (online) {
                             com.bitchat.android.util.SyncWorkScheduler.scheduleFlush(applicationContext)
+                            try { com.bitchat.android.vlm.IndradhanuGateway.kick() } catch (_: Exception) { }
                             refreshLocalIngest()
                         }
                     }

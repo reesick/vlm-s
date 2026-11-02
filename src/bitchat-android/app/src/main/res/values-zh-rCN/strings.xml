@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- TODO: Chinese (Simplified) translations -->
-    <!-- Machine-translated (Claude) — pending native-speaker review -->
+    <!-- Machine-translated — pending native-speaker review -->
   <plurals name="location_notes_title">
     <item quantity="one">#%1$s ± 1 • %2$d 条笔记</item>
     <item quantity="other">#%1$s ± 1 • %2$d 条笔记</item>

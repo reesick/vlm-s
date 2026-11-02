@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.rounded.Place
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.Animatable
@@ -36,6 +37,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -57,6 +61,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -217,7 +222,9 @@ fun MessagesList(
     onNicknameClick: ((String) -> Unit)? = null,
     onMessageLongPress: ((BitchatMessage) -> Unit)? = null,
     onCancelTransfer: ((BitchatMessage) -> Unit)? = null,
-    onImageClick: ((String, List<String>, Int) -> Unit)? = null
+    onImageClick: ((String, List<String>, Int) -> Unit)? = null,
+    /** Shown as a "View on map" chip under any message that carries a `geo:` tag. */
+    onViewLocation: ((BitchatMessage) -> Unit)? = null
 ) {
     val resolvedMentionPeerIdentities = remember(messages, mentionPeerIdentities) {
         mentionPeerIdentities ?: buildMentionPeerIdentityMap(messages)
@@ -360,6 +367,7 @@ fun MessagesList(
                 onMessageLongPress = onMessageLongPress,
                 onCancelTransfer = onCancelTransfer,
                 onImageClick = onImageClick,
+                onViewLocation = onViewLocation,
                 modifier = Modifier
                     // Animates the shift when a neighbour is inserted or removed: this is what
                     // makes the conversation glide up instead of jumping.
@@ -390,6 +398,7 @@ fun MessageItem(
     onMessageLongPress: ((BitchatMessage) -> Unit)? = null,
     onCancelTransfer: ((BitchatMessage) -> Unit)? = null,
     onImageClick: ((String, List<String>, Int) -> Unit)? = null,
+    onViewLocation: ((BitchatMessage) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -399,7 +408,9 @@ fun MessageItem(
         modifier = modifier
             .fillMaxWidth()
             .padding(top = topSpacing),
-        verticalArrangement = Arrangement.spacedBy(0.dp)
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+        // Chips under a bubble (location, reach) follow the bubble's side.
+        horizontalAlignment = if (message.sender == currentUserNickname) Alignment.End else Alignment.Start,
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Row(
@@ -440,6 +451,22 @@ fun MessageItem(
                         DeliveryStatusIcon(status = status)
                     }
                 }
+            }
+        }
+
+        // A message that carries a position opens the map on it. Spatial and conversational
+        // views of the same event are one tap apart in both directions.
+        if (onViewLocation != null) {
+            val hasLocation = remember(message.content) {
+                com.bitchat.android.ui.map.parseGeoTag(message.content) != null
+            }
+            if (hasLocation) {
+                MessageLocationChip(
+                    isSos = remember(message.content) {
+                        com.bitchat.android.ui.map.isSosMessage(message.content)
+                    },
+                    onClick = { onViewLocation(message) }
+                )
             }
         }
 
@@ -694,27 +721,35 @@ internal fun TextMessageLayout(
     showSender: Boolean = true,
     bodyContent: String = message.content,
 ) {
-    val palette = LocalBitchatPalette.current
+    val basePalette = LocalBitchatPalette.current
     val myPeerId = meshService.myPeerID
+    val isSelf = message.isFromSelf(currentUserNickname, myPeerId)
+    // Your own messages sit in an accent bubble: everything inside it (timestamp, links,
+    // mentions) is drawn in the bubble's foreground so it keeps its contrast.
+    val bubbleColor = if (isSelf) basePalette.bubbleOutgoing else basePalette.bubbleIncoming
+    val inkColor = if (isSelf) basePalette.onBubbleOutgoing else colorScheme.onSurface
+    val palette = remember(basePalette, isSelf) {
+        if (isSelf) basePalette.copy(textTertiary = basePalette.onBubbleOutgoing.copy(alpha = 0.72f)) else basePalette
+    }
+    val linkColor = if (isSelf) basePalette.onBubbleOutgoing else colorScheme.primary
     val displayMessage = remember(message, bodyContent) {
         if (bodyContent == message.content) message else message.copy(content = bodyContent)
     }
-    val senderText = remember(message, currentUserNickname, myPeerId, palette) {
+    val senderText = remember(message, currentUserNickname, myPeerId, basePalette) {
         formatTextMessageSender(
             message = message,
             currentUserNickname = currentUserNickname,
             myPeerID = myPeerId,
-            palette = palette,
+            palette = basePalette,
         )
     }
-    // The timestamp trails the body rather than occupying its own column, so a short message
-    // no longer reserves a full-width row for eight grey characters.
+    // The timestamp trails the body inside the bubble rather than occupying its own row.
     val bodyText = remember(
         displayMessage,
         currentUserNickname,
         palette,
-        colorScheme.onSurface,
-        colorScheme.secondary,
+        inkColor,
+        linkColor,
         mentionPeerIdentities,
         timeFormatter
     ) {
@@ -722,30 +757,32 @@ internal fun TextMessageLayout(
             message = displayMessage,
             currentUserNickname = currentUserNickname,
             palette = palette,
-            contentColor = colorScheme.onSurface,
-            linkColor = colorScheme.secondary,
+            contentColor = inkColor,
+            linkColor = linkColor,
             mentionPeerIdentities = mentionPeerIdentities,
             timeFormatter = timeFormatter,
         )
     }
-    val isSelf = message.isFromSelf(currentUserNickname, myPeerId)
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     val handleLongPress: () -> Unit = {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         onMessageLongPress?.invoke(message)
     }
+    // Emergency messages keep red as their only signal: a red bubble edge, never red text.
+    val isSos = remember(message.content) { com.bitchat.android.ui.map.isSosMessage(message.content) }
 
     Column(
         modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = if (isSelf) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(MessageGrouping.SENDER_TO_BODY_SPACING),
     ) {
-        if (showSender) {
+        if (showSender && !isSelf) {
             AnnotatedClickableText(
                 text = senderText,
                 annotationTags = listOf("nickname_click"),
                 onAnnotationClick = { tag, item ->
-                    if (tag == "nickname_click" && !isSelf && onNicknameClick != null) {
+                    if (tag == "nickname_click" && onNicknameClick != null) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         onNicknameClick.invoke(item)
                         true
@@ -755,41 +792,59 @@ internal fun TextMessageLayout(
                 },
                 onLongPress = handleLongPress,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = MessageGrouping.SENDER_TOP_PADDING),
+                    .padding(top = MessageGrouping.SENDER_TOP_PADDING, start = 12.dp),
                 fontFamily = BitchatFontFamily,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
                 style = MessageSenderTextStyle,
             )
+        } else if (showSender) {
+            Spacer(Modifier.height(MessageGrouping.SENDER_TOP_PADDING))
         }
 
-        AnnotatedClickableText(
-            text = bodyText,
-            annotationTags = listOf("geohash_click", "url_click"),
-            onAnnotationClick = { tag, item ->
-                when (tag) {
-                    "geohash_click" -> {
-                        navigateToGeohash(context, item)
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        true
-                    }
+        Box(
+            Modifier
+                .fillMaxWidth(0.82f)
+                .wrapContentWidth(if (isSelf) Alignment.End else Alignment.Start)
+        ) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(bubbleColor)
+                    .then(
+                        if (isSos) Modifier.border(1.5.dp, colorScheme.error, RoundedCornerShape(18.dp))
+                        else Modifier
+                    )
+                    .padding(horizontal = 13.dp, vertical = 8.dp)
+            ) {
+                AnnotatedClickableText(
+                    text = bodyText,
+                    annotationTags = listOf("geohash_click", "url_click"),
+                    onAnnotationClick = { tag, item ->
+                        when (tag) {
+                            "geohash_click" -> {
+                                navigateToGeohash(context, item)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                true
+                            }
 
-                    "url_click" -> {
-                        openMessageUrl(context, item)
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        true
-                    }
+                            "url_click" -> {
+                                openMessageUrl(context, item)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                true
+                            }
 
-                    else -> false
-                }
-            },
-            onLongPress = handleLongPress,
-            fontFamily = BitchatFontFamily,
-            softWrap = true,
-            overflow = TextOverflow.Visible,
-            style = MessageBodyTextStyle.copy(color = colorScheme.onSurface),
-        )
+                            else -> false
+                        }
+                    },
+                    onLongPress = handleLongPress,
+                    fontFamily = BitchatFontFamily,
+                    softWrap = true,
+                    overflow = TextOverflow.Visible,
+                    style = MessageBodyTextStyle.copy(color = inkColor),
+                )
+            }
+        }
     }
 }
 
@@ -1024,5 +1079,37 @@ fun MessageReachRow(message: BitchatMessage) {
                     .clickable { expanded = !expanded }
             )
         }
+    }
+}
+
+/** "View on map" under a message that carries a `geo:` tag; red for an SOS. */
+@Composable
+private fun MessageLocationChip(isSos: Boolean, onClick: () -> Unit) {
+    val accent = if (isSos) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier
+            .padding(top = 6.dp, bottom = 2.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(accent.copy(alpha = 0.10f))
+            .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+            .semantics { contentDescription = if (isSos) "View SOS location on map" else "View on map" },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Place,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(14.dp)
+        )
+        androidx.compose.foundation.layout.Spacer(Modifier.size(6.dp))
+        Text(
+            text = if (isSos) "View SOS location" else "View on map",
+            fontFamily = BitchatFontFamily,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = accent
+        )
     }
 }
