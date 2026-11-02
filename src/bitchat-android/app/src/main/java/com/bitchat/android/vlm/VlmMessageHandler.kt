@@ -6,6 +6,7 @@ import com.bitchat.android.mesh.MeshService
 import com.bitchat.android.mesh.PrivateMediaPreparation
 import com.bitchat.android.model.BitchatFilePacket
 import com.bitchat.android.model.BitchatMessage
+import com.bitchat.android.model.BitchatMessageType
 import com.bitchat.android.model.DeliveryStatus
 import com.bitchat.android.service.MeshServiceHolder
 import com.bitchat.android.services.AppStateStore
@@ -207,33 +208,33 @@ object VlmMessageHandler {
 
             if (resolvedPeerId != null) {
                 sendPrivateImage(mesh, resolvedPeerId, filePacket, transferId)
-                
-                val message = BitchatMessage(
-                    id = messageId,
-                    sender = nickname,
-                    senderPeerID = null,
-                    content = caption ?: "[Image]",
-                    timestamp = Date(),
-                    isRelay = false,
-                    deliveryStatus = DeliveryStatus.Sent
-                )
+
+                val message = localImageMessage(context, messageId, nickname, fileName, imageBytes, caption, null)
                 AppStateStore.addPrivateMessage(resolvedPeerId, message)
+                if (!caption.isNullOrBlank()) {
+                    val peerNickname = mesh.getPeerNicknames()[resolvedPeerId] ?: resolvedPeerId
+                    val captionId = "$messageId-caption"
+                    mesh.sendPrivateMessage(caption, resolvedPeerId, peerNickname, captionId)
+                    AppStateStore.addPrivateMessage(resolvedPeerId, localTextMessage(captionId, nickname, caption, null))
+                }
             } else {
                 mesh.sendFileBroadcast(filePacket)
-                
-                val message = BitchatMessage(
-                    id = messageId,
-                    sender = nickname,
-                    senderPeerID = null,
-                    content = caption ?: "[Image]",
-                    timestamp = Date(),
-                    isRelay = false,
-                    deliveryStatus = DeliveryStatus.Sent
-                )
+
+                val message = localImageMessage(context, messageId, nickname, fileName, imageBytes, caption, resolvedChannel)
                 if (resolvedChannel != null) {
                     AppStateStore.addChannelMessage(resolvedChannel, message)
                 } else {
                     AppStateStore.addPublicMessage(message)
+                }
+                if (!caption.isNullOrBlank()) {
+                    // The file packet carries no caption, so peers get it as a follow-up text.
+                    mesh.sendMessage(caption, emptyList(), resolvedChannel)
+                    val captionMsg = localTextMessage("$messageId-caption", nickname, caption, resolvedChannel)
+                    if (resolvedChannel != null) {
+                        AppStateStore.addChannelMessage(resolvedChannel, captionMsg)
+                    } else {
+                        AppStateStore.addPublicMessage(captionMsg)
+                    }
                 }
             }
 
@@ -246,6 +247,63 @@ object VlmMessageHandler {
             VlmResult.Error("Failed to send image: ${e.message}")
         }
     }
+
+    /**
+     * Local echo of an image sent through the VLM API. The chat renders
+     * BitchatMessageType.Image by decoding the file at `content`, so the bytes
+     * are written to app storage first (same place incoming images go).
+     * Falls back to a text echo only if the file cannot be written.
+     */
+    private fun localImageMessage(
+        context: Context,
+        messageId: String,
+        nickname: String,
+        fileName: String,
+        imageBytes: ByteArray,
+        caption: String?,
+        channel: String?
+    ): BitchatMessage {
+        val path = try {
+            val dir = File(context.cacheDir, "images/outgoing").apply { mkdirs() }
+            val out = File(dir, fileName)
+            out.writeBytes(imageBytes)
+            out.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to store VLM image for local display: ${e.message}", e)
+            null
+        }
+        return if (path != null) {
+            BitchatMessage(
+                id = messageId,
+                sender = nickname,
+                senderPeerID = null,
+                content = path,
+                type = BitchatMessageType.Image,
+                timestamp = Date(),
+                isRelay = false,
+                deliveryStatus = DeliveryStatus.Sent,
+                channel = channel
+            )
+        } else {
+            localTextMessage(messageId, nickname, caption ?: "[Image]", channel)
+        }
+    }
+
+    private fun localTextMessage(
+        messageId: String,
+        nickname: String,
+        text: String,
+        channel: String?
+    ): BitchatMessage = BitchatMessage(
+        id = messageId,
+        sender = nickname,
+        senderPeerID = null,
+        content = text,
+        timestamp = Date(),
+        isRelay = false,
+        deliveryStatus = DeliveryStatus.Sent,
+        channel = channel
+    )
 
     private suspend fun sendPrivateImage(
         mesh: MeshService,
