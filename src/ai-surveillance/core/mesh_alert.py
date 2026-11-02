@@ -212,7 +212,8 @@ class BitchatSender:
         r = self._post("/send/image", files={"image": (name, jpg, "image/jpeg")})
         image_ok = bool(r is not None and r.status_code == 200)
         if image_ok:
-            self._next_ok = time.perf_counter() + self.image_settle_s
+            # settle time scales with size: ~4 s + 1 s per 5 KB (a 6 KB frame -> ~5 s)
+            self._next_ok = time.perf_counter() + min(self.image_settle_s, 4.0 + len(jpg) / 5120)
         print(f"[mesh] image {name} {len(jpg) // 1024} KB -> {r.status_code if r is not None else 'failed'}")
         text_ok = []
         for part in alert.text_parts():
@@ -227,5 +228,5 @@ class BitchatSender:
             text_ok.append(ok)
             print(f"[mesh]   command-centre copy (IDX1|S) -> {r.status_code if r is not None else 'failed'}")
         # let the text go out before the next alert's image starts
-        self._next_ok = time.perf_counter() + self.gap_s + 2.0
+        self._next_ok = time.perf_counter() + self.gap_s
         return SendResult(image_ok, text_ok)
