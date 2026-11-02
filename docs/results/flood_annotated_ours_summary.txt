@@ -1,0 +1,40 @@
+Annotated breakdown: WhatsApp Video 2026-10-10 at 11.34.09 AM.mp4 (396x480, 30 fps, 325 frames, 10.8s)
+VLM decisions: 10  full=5  region=4  skip=1
+image tokens spent: 1372  vs 2380 if every decision were a full call (42% saved)
+mean VLM latency: 4.05s  kv_reused on all calls: True
+total wall time: 53.8s
+
+OVERALL: OVERALL: High
+
+The video shows a flood event with varying levels of risk for people and vehicles. Initially, the floodwater was moderate with a slow flow rate, and there were no visible water under bridges, roads, or buildings. People and vehicles were moving along the bridge, with some individuals walking and others standing. As the flood progressed, the water became more rapid, covering the lower half of the bridge and road, and people were running or walking along the road, with vehicles moving slowly. The risk increased as the floodwater flowed over the bridge, covering the road and bridge, and people were walking or driving along the bridge. The floodwater then slowed down again, but people and vehicles were still moving along the riverbank, with some individuals carrying equipment. The risk remained high throughout
+
+Timeline:
+  t=  1.0s FULL   100.0% px 238 tok (first) 3.73s [medium] The floodwater is moderate with a slow flow rate. There is no visible water under bridges, roads, or buildings. People and vehicles are moving along the bridge, with one person labeled P1 standing near the edge.
+      P1 (track 1): on_bridge / standing / risk none
+  t=  2.0s FULL   100.0% px 238 tok (camera moved) 3.94s [high] The floodwater is flowing rapidly, covering the lower half of the bridge and road. There is no visible water under buildings. People are running along the road, while vehicles are moving slowly.
+      P1 (track 5): wading / running right, fast / risk high
+      P2 (track 4): walking_pace / walking right / risk high
+  t=  3.0s REGION  19.7% px  42 tok (4 new/moved actor(s)) 4.34s [medium] [region update] There is moderate floodwater with a flow rate of approximately 5 feet per second. The bridge is partially submerged, with only the top part visible above the waterline. People and vehicles are moving along the road, with some individuals walking and others driving.  (full view: The floodwater is flowing rapidly, covering the lower half of the bridge and road. There is no visible water under build)
+      P1 (track 5): on_bridge / walking right / risk none
+      P2 (track 4): on_bridge / walking right / risk none
+      P3 (track 12): in_water / walking up / risk medium
+      P4 (track 1): in_water / walking up / risk medium
+  t=  4.0s FULL   100.0% px 238 tok (camera moved) 4.44s [medium] The floodwater is flowing rapidly over the bridge, with no visible water covering the road or buildings. People and vehicles are moving along the bridge, with some individuals walking and others possibly driving.
+      P1 (track 12): on_bridge / moving up (away) / risk high
+  t=  5.0s FULL   100.0% px 238 tok (camera moved) 3.46s [medium] The floodwater is flowing rapidly, covering most of the road and bridge. There is no visible water under buildings. People are walking along the bridge, and vehicles are moving on the road.
+      P1 (track 12): on_bridge / walking up / risk none
+  t=  6.0s REGION  11.8% px  25 tok (1 new/moved actor(s)) 3.42s [medium] [region update] There is moderate floodwater with a slow flow rate. No bridge, road, or building is under water. People and vehicles are moving along the path, with no signs of distress.  (full view: The floodwater is flowing rapidly, covering most of the road and bridge. There is no visible water under buildings. Peop)
+      P1 (track 1): wading / walking up / risk none
+  t=  7.0s FULL   100.0% px 238 tok (camera moved) 4.33s [medium] The floodwater is moderate with a slow flow rate. There is no visible water under bridges, roads, or buildings. People and vehicles are moving along the walkway, with some individuals walking and others standing.
+      P1 (track 25): on_bridge / moving up (away) / risk high
+      P2 (track 28): on_bridge / moving up (away) / risk high
+      P3 (track 30): unknown / unknown / risk low
+  t=  8.0s REGION  42.1% px  90 tok (6 new/moved actor(s)) 5.97s [medium] [region update] The floodwater is moderate with a slow flow rate. There is no visible water under bridges, roads, or buildings. People and vehicles are moving along the riverbank, with some individuals walking and others standing near the water's edge.  (full view: The floodwater is moderate with a slow flow rate. There is no visible water under bridges, roads, or buildings. People a)
+      P1 (track 33): wading / walking up / risk none
+      P2 (track 28): wading / walking up / risk none
+      P3 (track 34): wading / walking up / risk none
+      P4 (track 40): unknown / unknown / risk low
+      P5 (track 39): swept_away / moving down / risk high
+      P6 (track 30): rescuing / walking up / risk medium
+  t=  9.0s REGION  11.8% px  25 tok (1 new/moved actor(s)) 2.81s [unknown] [region update] The floodwater level is moderate with a slow flow rate. There is no visible water under bridges, roads, or buildings. People and vehicles are moving along the road, with some individuals carrying equipment.  (full view: The floodwater is moderate with a slow flow rate. There is no visible water under bridges, roads, or buildings. People a)
+  t= 10.0s SKIP   0 tok (no new/moved actors; previous answer kept)

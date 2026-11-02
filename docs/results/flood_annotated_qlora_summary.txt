@@ -1,0 +1,41 @@
+Annotated breakdown: WhatsApp Video 2026-10-10 at 11.34.09 AM.mp4 (396x480, 30 fps, 325 frames, 10.8s)
+VLM decisions: 10  full=5  region=4  skip=1
+image tokens spent: 1372  vs 2380 if every decision were a full call (42% saved)
+mean VLM latency: 5.40s  kv_reused on all calls: True
+total wall time: 59.4s
+
+OVERALL: OVERALL: High  
+The video shows a dangerous and turbulent flood situation where multiple people are crossing a damaged bridge directly above fast, turbulent brown floodwater. The risk level is high due to the fast current, the danger posed by the muddy and turbulent water, and the fact that several people are crossing the bridge on foot. The situation changes as the water becomes even more turbulent and dangerous, with the current surging on both sides of the bridge and the bridge itself becoming increasingly damaged.
+
+Timeline:
+  t=  1.0s FULL   100.0% px 238 tok (first) 5.47s [high] Fast, turbulent brown floodwater is rushing past a long bridge that is partly washed over, and two people are crossing the bridge on foot.
+      P1 (track 1): on_bridge / crossing bridge / risk high
+  t=  2.0s FULL   100.0% px 238 tok (camera moved) 5.44s [high] Fast, turbulent brown floodwater surges on both sides of a long, damaged bridge; two people are crossing the bridge on foot above the raging current.
+      P1 (track 5): on_bridge / crossing bridge / risk high
+      P2 (track 4): on_bridge / crossing bridge / risk high
+  t=  3.0s REGION  19.7% px  42 tok (4 new/moved actor(s)) 5.45s [high] [region update] Fast, turbulent brown floodwater churns on both sides of a long, damaged bridge; four people are crossing the bridge on foot directly above the raging current.  (full view: Fast, turbulent brown floodwater surges on both sides of a long, damaged bridge; two people are crossing the bridge on f)
+      P1 (track 5): on_bridge / crossing bridge / risk high
+      P2 (track 4): on_bridge / crossing bridge / risk high
+      P3 (track 12): on_bridge / crossing bridge / risk high
+      P4 (track 1): on_bridge / crossing bridge / risk high
+  t=  4.0s FULL   100.0% px 238 tok (camera moved) 5.41s [high] Fast, turbulent brown floodwater surges on both sides of a long, damaged bridge; two people are crossing the bridge on foot directly above the raging current.
+      P1 (track 12): on_bridge / crossing bridge / risk high
+  t=  5.0s FULL   100.0% px 238 tok (camera moved) 5.50s [high] Fast, turbulent brown floodwater on both sides of a long bridge that is mostly dry above the raging current, with one person walking on the bridge over the dangerous current.
+      P1 (track 12): on_bridge / crossing bridge / risk high
+  t=  6.0s REGION  11.8% px  25 tok (1 new/moved actor(s)) 5.20s [high] [region update] Fast, turbulent brown floodwater churns on both sides of a long bridge; two people are crossing the bridge on foot above the dangerous current.  (full view: Fast, turbulent brown floodwater on both sides of a long bridge that is mostly dry above the raging current, with one pe)
+      P1 (track 1): on_bridge / crossing bridge / risk high
+  t=  7.0s FULL   100.0% px 238 tok (camera moved) 5.40s [high] Violent muddy floodwater is rushing past a long bridge, and three people are crossing the bridge on foot directly above the raging current.
+      P1 (track 25): on_bridge / crossing bridge / risk high
+      P2 (track 28): on_bridge / crossing bridge / risk high
+      P3 (track 30): on_bridge / crossing bridge / risk high
+  t=  8.0s REGION  42.1% px  90 tok (6 new/moved actor(s)) 5.61s [high] [region update] Fast, turbulent brown floodwater surges on both sides of a long bridge, and several people are crossing the bridge on foot directly above the raging current.  (full view: Violent muddy floodwater is rushing past a long bridge, and three people are crossing the bridge on foot directly above )
+      P1 (track 33): on_bridge / crossing bridge / risk high
+      P2 (track 28): on_bridge / crossing bridge / risk high
+      P3 (track 34): on_bridge / crossing bridge / risk high
+      P4 (track 40): on_bridge / crossing bridge / risk high
+      P5 (track 39): on_bridge / crossing bridge / risk high
+      P6 (track 30): on_bridge / crossing bridge / risk high
+  t=  9.0s REGION  11.8% px  25 tok (1 new/moved actor(s)) 5.15s [high] [region update] Fast, turbulent brown floodwater churns past a damaged bridge; two people are crossing on foot above the raging current.  (full view: Violent muddy floodwater is rushing past a long bridge, and three people are crossing the bridge on foot directly above )
+      P1 (track 41): on_bridge / crossing bridge / risk high
+      P2 (track 33): on_bridge / crossing bridge / risk high
+  t= 10.0s SKIP   0 tok (no new/moved actors; previous answer kept)
