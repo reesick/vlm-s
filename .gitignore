@@ -8,9 +8,12 @@ venv/
 # Model weights (downloaded at runtime - see src/ai-surveillance/models/README.md)
 src/ai-surveillance/models/*
 !src/ai-surveillance/models/README.md
+# Hugging Face cache (VLM weights)
+.hf-cache/
 
 # Runtime artifacts
 src/ai-surveillance/*.log
+src/ai-surveillance/logs/
 data/*.db
 data/**/*.jpg
 data/**/*.mp4
@@ -26,3 +29,25 @@ local.properties
 .idea/
 .vscode/
 Thumbs.db
+
+# Large local media / archives (kept out of git; share separately)
+*.zip
+*.mp4
+*.pptx
+*.docx
+data/annotated/
+data/flood_reports/
+data/disaster_images/*.jpg
+data/disaster_images/*.png
+src/ai-surveillance/data/annotated/
+src/ai-surveillance/data/flood_reports/
+src/ai-surveillance/data/disaster_images/*.jpg
+src/ai-surveillance/data/disaster_images/*.png
+src/ai-surveillance/benchmarks/out/
+src/ai-surveillance/benchmarks/*.log
+src/ai-surveillance/tools/cam_*.jpg
+# Local scratch
+structure copy.txt
+image.png
+.kotlin/
+
