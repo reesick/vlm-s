@@ -81,10 +81,14 @@ class FaceRecognizer:
         self.dim = int(f.get("dim", 512))           # MobileFaceNet output dim
 
         # insightface model pack — buffalo_s = SCRFD-500M + MobileFaceNet
+        # root is configurable: insightface defaults to ~/.insightface which can
+        # end up on a full system drive; models.yaml pins it next to the other
+        # weights instead (sets root: "." -> <cwd>/models).
         model_name = f.get("model_pack", "buffalo_s")
         self.app = FaceAnalysis(
             name=model_name,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            root=f.get("root", "~/.insightface"),
         )
         self.app.prepare(ctx_id=0, det_size=(self.det_size, self.det_size))
 

@@ -1381,3 +1381,75 @@ def _compute_iou(box_a: tuple, box_b: tuple) -> float:
 def _load_cfg(section: str) -> dict[str, Any]:
     from core.config import load_models_config
     return load_models_config().get(section, {})
+
+# =============================================================================
+# 7. Flood Detection — water-colour + temporal-motion heuristic
+# =============================================================================
+
+class FloodDetector:
+    """Flags large moving water regions (muddy brown/tan or blue-grey flood).
+
+    Cheap CPU-only check on a downscaled frame: a pixel counts as flood when
+    its colour is water-like (low-to-mid saturation brown/tan/blue-grey) AND it
+    changed between consecutive checks. The motion term separates flowing
+    water from static soil, roads and walls. The flood must cover
+    `min_ratio` of the frame for `min_consecutive` checks before an event fires.
+    """
+
+    def __init__(self, cfg: dict[str, Any] | None = None):
+        cfg = cfg or {}
+        self.scale_w = int(cfg.get("scale_w", 160))
+        self.min_ratio = float(cfg.get("min_ratio", 0.25))
+        self.min_consecutive = int(cfg.get("min_consecutive", 3))
+        self.motion_thresh = int(cfg.get("motion_thresh", 6))
+        self.min_motion_ratio = float(cfg.get("min_motion_ratio", 0.35))
+        self.cooldown_checks = int(cfg.get("cooldown_checks", 20))
+        # muddy brown / tan (H 5-30) and blue-grey / green-grey water (H 85-130)
+        self.mud_low = tuple(cfg.get("mud_hsv_low", (5, 40, 60)))
+        self.mud_high = tuple(cfg.get("mud_hsv_high", (30, 200, 230)))
+        self.blue_low = tuple(cfg.get("blue_hsv_low", (85, 25, 50)))
+        self.blue_high = tuple(cfg.get("blue_hsv_high", (130, 200, 230)))
+        self._prev_gray: np.ndarray | None = None
+        self._consecutive = 0
+        self._cooldown = 0
+
+    def detect(self, frame: np.ndarray, frame_idx: int) -> list[Event]:
+        import cv2
+        h, w = frame.shape[:2]
+        small = cv2.resize(frame, (self.scale_w, max(1, int(h * self.scale_w / w))),
+                           interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+        water = cv2.inRange(hsv, self.mud_low, self.mud_high) | \
+            cv2.inRange(hsv, self.blue_low, self.blue_high)
+        water = cv2.morphologyEx(water, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        prev, self._prev_gray = self._prev_gray, gray
+        if prev is None or prev.shape != gray.shape:
+            return []
+        moving = cv2.absdiff(gray, prev) > self.motion_thresh
+        water_px = int(cv2.countNonZero(water))
+        total = water.size
+        ratio = water_px / total
+        motion_ratio = (float(np.count_nonzero(moving & (water > 0))) / water_px) if water_px else 0.0
+        if self._cooldown > 0:
+            self._cooldown -= 1
+        if ratio >= self.min_ratio and motion_ratio >= self.min_motion_ratio:
+            self._consecutive += 1
+        else:
+            self._consecutive = 0
+            return []
+        if self._consecutive < self.min_consecutive or self._cooldown > 0:
+            return []
+        self._cooldown = self.cooldown_checks
+        ys, xs = np.nonzero(water)
+        sx, sy = w / small.shape[1], h / small.shape[0]
+        bbox = (int(xs.min() * sx), int(ys.min() * sy), int(xs.max() * sx), int(ys.max() * sy))
+        conf = min(0.95, 0.5 + 0.5 * min(1.0, ratio / 0.6))
+        return [Event(
+            event_type="FLOOD",
+            t_iso=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            frame_idx=frame_idx,
+            details={"bbox": bbox, "water_ratio": round(ratio, 3),
+                     "motion_ratio": round(motion_ratio, 3),
+                     "confidence": round(conf, 2), "method": "hsv_motion_heuristic"},
+        )]

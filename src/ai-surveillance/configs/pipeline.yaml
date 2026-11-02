@@ -11,16 +11,17 @@
 #   3. Set ip below and flip enabled to true
 bitchat:
   enabled: true             
-  ip: "10.164.102.114"         # Android WiFi IP for the Bitchat VLM API
+  ip: "172.31.148.5"         # Android WiFi IP for the Bitchat VLM API
   port: 8765
-  # channel: "surveillance"  # Optional: uncomment to send to specific channel, otherwise uses default destination
+  channel: "surveillance"    # Bitchat group the alerts are posted to (join #surveillance on the phone)
   rate_limit_s: 5.5
   send_keyframes: false     # no detector logs are sent — only the VLM image + description
   send_scene: true
 
 source:
   type: webcam          # webcam | file | rtsp
-  path: null            # used for `file` and `rtsp`
+  path: 2               # camera index: 2 = Samsung A36 virtual camera
+  backend: DSHOW        # MSMF returns black frames for this virtual camera
   loop: true            # restart file on EOF (let accuracy tests run indefinitely)
   reconnect: true       # rtsp only — auto-reconnect
   width: 1280
@@ -67,6 +68,9 @@ router:
     fire_smoke:
       enabled: true
       every: 15           # 1-2 fps at 30fps source — slow-evolving event
+    flood:
+      enabled: true
+      every: 5            # cheap CPU check on 160px frame; floods evolve slowly
     smoking:
       enabled: true
       every: 10           # 3 fps — low urgency
@@ -100,6 +104,9 @@ router:
     vlm_escalated:
       enabled: true       # Phase 6: VLM escalated pass (triggered by detector priority)
       every: 1            # On-demand — runs when detector flags high priority
+      min_interval_s: 4.0 # gap after each real VLM inference before the next one
+                          # (FALL/FIRE/FIGHT/VIOLENCE skip it). Loop runs ~49 FPS
+                          # between calls and ~11 FPS while the VLM is busy.
 
 features:
   detection: true
@@ -110,6 +117,7 @@ features:
   face: true
   identity_fusion: true
   fire_smoke: true
+  flood: true
   smoking: true
   phone: true
   gathering: true

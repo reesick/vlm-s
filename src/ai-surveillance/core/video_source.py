@@ -14,15 +14,22 @@ from typing import Any
 import cv2
 
 
-def _get_preferred_backend() -> int:
-    """Get platform-appropriate video backend."""
+def _get_preferred_backends() -> tuple[tuple[int, str], ...]:
+    """Ordered backend candidates per platform.
+
+    Windows has two native capture APIs. DSHOW is faster to start but its
+    OpenCV shims are the more brittle of the two (driver updates and certain
+    camera drivers leave it raising a C++ exception on open-by-index), while
+    MSMF works on every device Windows can see. Try MSMF first, fall back to
+    DSHOW for machines where MSMF is unavailable (e.g. stripped N editions).
+    """
     if sys.platform == "win32":
-        return cv2.CAP_DSHOW
-    elif sys.platform == "linux":
-        return cv2.CAP_V4L2
-    elif sys.platform == "darwin":
-        return cv2.CAP_AVFOUNDATION
-    return cv2.CAP_ANY
+        return ((cv2.CAP_MSMF, "MSMF"), (cv2.CAP_DSHOW, "DSHOW"))
+    if sys.platform == "linux":
+        return ((cv2.CAP_V4L2, "V4L2"),)
+    if sys.platform == "darwin":
+        return ((cv2.CAP_AVFOUNDATION, "AVFOUNDATION"),)
+    return ((cv2.CAP_ANY, "ANY"),)
 
 
 class VideoSource(ABC):
@@ -65,30 +72,95 @@ class VideoSource(ABC):
 class WebcamSource(VideoSource):
     """Laptop webcam with retry logic."""
 
-    def __init__(self, index: int = 0, width: int | None = 1280, height: int | None = 720, max_retries: int = 3):
+    def __init__(self, index: int = 0, width: int | None = 1280, height: int | None = 720, max_retries: int = 5,
+                 backend: str | None = None):
         super().__init__(width, height)
+        self.backend = backend.upper() if backend else None
         self.index = index
         self.max_retries = max_retries
+        self.open_timeout_s = 120.0
         self._consecutive_failures = 0
 
     def open(self) -> None:
-        backend = _get_preferred_backend()
-        self.cap = cv2.VideoCapture(self.index, backend)
-        self._apply_resolution()
-        if not self.isOpened():
-            raise RuntimeError(f"Could not open webcam index {self.index}")
+        """Open the camera, waiting up to `open_timeout_s` for it to appear.
+
+        Phone/virtual cameras (Samsung A36 via Link to Windows, DroidCam) are
+        often not ready when the pipeline starts, so keep retrying instead of
+        failing on the first attempt. Override with env CAMERA_OPEN_TIMEOUT_S.
+        """
+        import os
+        import time
+        timeout = float(os.environ.get("CAMERA_OPEN_TIMEOUT_S", self.open_timeout_s))
+        t0 = time.monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                self._open_once()
+                if attempt > 1:
+                    print(f"[webcam] camera {self.index} opened after {time.monotonic() - t0:.0f}s")
+                return
+            except RuntimeError as e:
+                waited = time.monotonic() - t0
+                if waited >= timeout:
+                    raise RuntimeError(f"{e}; waited {waited:.0f}s") from None
+                if attempt == 1:
+                    print(f"[webcam] camera {self.index} not ready yet; waiting up to "
+                          f"{timeout:.0f}s (start the phone camera app now)")
+                time.sleep(2.0)
+
+    def _open_once(self) -> None:
+        tried = []
+        cands = _get_preferred_backends()
+        if self.backend:
+            cands = tuple(c for c in cands if c[1] == self.backend) or cands
+        for backend, name in cands:
+            tried.append(name)
+            self.cap = cv2.VideoCapture(self.index, backend)
+            self._apply_resolution()
+            if self.isOpened():
+                return
+            self.cap.release()
+            self.cap = None
+        raise RuntimeError(
+            f"Could not open webcam index {self.index} with any backend (tried: {', '.join(tried)})"
+        )
 
     def read(self) -> tuple[bool, Any]:
-        ok, frame = self.cap.read()
-        
-        if not ok:
+        """Read a frame; keep waiting through stalls and re-open a lost camera.
+
+        Phone/virtual cameras (Samsung, DroidCam) are slow to start and stall.
+        Black or splash-screen frames are valid frames and are passed through.
+        Only report end-of-stream after `give_up_s` seconds with no frame at all.
+        """
+        import time
+        give_up_s = 300.0
+        t_fail = None
+        last_reopen = 0.0
+        while True:
+            ok, frame = self.cap.read()
+            if ok and frame is not None:
+                self._consecutive_failures = 0
+                return True, frame
             self._consecutive_failures += 1
-            if self._consecutive_failures >= self.max_retries:
+            now = time.monotonic()
+            if t_fail is None:
+                t_fail = now
+                last_reopen = now
+            if now - t_fail > give_up_s:
+                print(f"[webcam] camera {self.index}: no frames for {give_up_s:.0f}s; giving up")
                 return False, None
-            return False, None
-        
-        self._consecutive_failures = 0
-        return True, frame
+            if now - last_reopen > 10.0:
+                last_reopen = now
+                print(f"[webcam] no frames from camera {self.index} for {now - t_fail:.0f}s; re-opening")
+                try:
+                    self.cap.release()
+                    time.sleep(1.0)
+                    self._open_once()
+                except Exception as e:
+                    print(f"[webcam] re-open failed: {e}")
+            else:
+                time.sleep(0.05)
 
 
 class FileSource(VideoSource):
@@ -282,7 +354,8 @@ def build_source(source_cfg: dict[str, Any]) -> VideoSource:
     height = source_cfg.get("height")
 
     if kind == "webcam":
-        return WebcamSource(index=int(path) if path is not None else 0, width=width, height=height)
+        return WebcamSource(index=int(path) if path is not None else 0, width=width, height=height,
+                            backend=source_cfg.get("backend"))
     if kind == "file":
         if not path:
             raise ValueError("source.type=file requires source.path")

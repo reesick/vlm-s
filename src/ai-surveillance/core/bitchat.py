@@ -115,13 +115,23 @@ class BitchatAlertClient:
         captured, then the description text is sent after Bitchat's own 5s API
         rate window has passed (messages sent sooner are silently dropped).
         """
-        if frame is not None:
-            print(f"[bitchat] Queuing scene image (downscaled for mesh)")
-            self._enqueue("/send/image", {"caption": scene_text}, frame, skip_rate=True)
-            self._enqueue("/send/text", {"text": scene_text}, None,
-                          skip_rate=True, delay_s=5.5)
-        else:
-            self._enqueue("/send/text", {"text": scene_text}, None, skip_rate=True)
+        # "Send on all": public mesh broadcast AND the configured group/channel.
+        # Each message waits 5.5s so the phone's own 5s API rate window never
+        # drops one. Image goes before its description.
+        if frame is None or not (scene_text or "").strip():
+            print("[bitchat] send_scene skipped: needs both a frame and a description")
+            return
+        dests = [None] + ([self.channel] if self.channel else [])
+        first = True
+        for dest in dests:
+            if frame is not None:
+                print(f"[bitchat] Queuing scene image -> {'#' + dest if dest else 'public broadcast'}")
+                self._enqueue("/send/image", {"caption": scene_text, "dest": dest}, frame,
+                              skip_rate=True, delay_s=0.0 if first else 5.5)
+                first = False
+            self._enqueue("/send/text", {"text": scene_text, "dest": dest}, None,
+                          skip_rate=True, delay_s=0.0 if first else 5.5)
+            first = False
 
     def send_alert(
         self,
@@ -205,8 +215,9 @@ class BitchatAlertClient:
                 form_data = {}
                 if caption:
                     form_data["caption"] = caption
-                if self.channel:
-                    form_data["channel"] = self.channel
+                chan = data["dest"] if "dest" in data else self.channel
+                if chan:
+                    form_data["channel"] = chan
 
                 r = None
                 for attempt in range(2):
@@ -232,8 +243,9 @@ class BitchatAlertClient:
             print(f"[bitchat] Sending text: {text_payload[:80]}")
             
             payload = {"text": text_payload}
-            if self.channel:
-                payload["channel"] = self.channel
+            chan = data["dest"] if "dest" in data else self.channel
+            if chan:
+                payload["channel"] = chan
                 
             r = requests.post(url, json=payload, timeout=self.timeout)
             print(f"[bitchat] Response: {r.status_code} - {r.json()}")

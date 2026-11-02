@@ -110,6 +110,7 @@ class EscalationHandler:
     """
     
     EVENT_TYPE_PRIORITIES = {
+        "FLOOD": 1.0,
         "FALL": 1.0,
         "FIRE": 0.95,
         "SMOKE": 0.90,

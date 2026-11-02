@@ -70,9 +70,18 @@ def _build_osnet(device: str, half: bool) -> tuple[Any, int]:
         import sysconfig
         _tr_root = pathlib.Path(sysconfig.get_path("purelib")) / "torchreid"
 
-    osnet_path = _tr_root / "reid" / "models" / "osnet.py"
-    if not osnet_path.exists():
-        raise FileNotFoundError(f"[reid] osnet.py not found at {osnet_path}")
+    # torchreid ships two on-disk layouts across versions:
+    #   - pip/v2 layout:  <purelib>/torchreid/reid/models/osnet.py  (legacy)
+    #   - GitHub source:  <purelib>/torchreid/models/osnet.py       (current)
+    candidates = [
+        _tr_root / "reid" / "models" / "osnet.py",
+        _tr_root / "models" / "osnet.py",
+    ]
+    osnet_path = next((p for p in candidates if p.exists()), None)
+    if osnet_path is None:
+        raise FileNotFoundError(
+            f"[reid] osnet.py not found (checked: {', '.join(str(p) for p in candidates)})"
+        )
 
     spec = importlib.util.spec_from_file_location("_osnet_mod", osnet_path)
     osnet_mod = importlib.util.module_from_spec(spec)

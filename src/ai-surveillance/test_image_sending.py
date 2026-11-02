@@ -23,7 +23,7 @@ def create_test_frame():
     
     return frame
 
-def test_bitchat_image_sending(ip="10.99.220.148", port=8765):
+def test_bitchat_image_sending(ip="192.168.1.5", port=8765):
     """Test Bitchat image sending with detailed logging."""
     print("="*60)
     print("BITCHAT IMAGE SENDING TEST")

@@ -151,6 +151,7 @@ class QueryEngine:
     """
     
     EVENT_TYPE_KEYWORDS = {
+        "flood": ["flood", "flooding", "flooded", "water", "river", "current", "submerged", "stranded", "rescue"],
         "fall": ["fall", "fell", "fallen", "falling", "trip", "tripped"],
         "fire": ["fire", "flame", "burning", "burned", "blaze"],
         "smoke": ["smoke", "smoking", "cigarette", "vape"],
