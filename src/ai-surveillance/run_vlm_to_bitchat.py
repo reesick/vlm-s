@@ -124,6 +124,7 @@ def main() -> int:
     ap.add_argument("--lon", type=float, default=None)
     ap.add_argument("--demo-pin", action="store_true",
                     help=f"place the camera inside the PCCOE drone map ({DEMO_PIN[0]}, {DEMO_PIN[1]}) and label it a demo position")
+    ap.add_argument("--no-clip", action="store_true", help="do not send the few seconds before a hazard as a clip")
     ap.add_argument("--node", default=os.environ.get("VLM_NODE_ID", "vlm-cam-01"), help="camera id shown in the command centre")
     a = ap.parse_args()
 
@@ -139,7 +140,8 @@ def main() -> int:
             lat, lon, demo = a.lat, a.lon, False
         if not key:
             print("[cc] --api given without --key (MESH_GATEWAY_KEY): the command centre will refuse the frames")
-        cc = CommandCentreLink(api, key, lat=lat, lon=lon, node_id=a.node, demo_position=demo)
+        cc = CommandCentreLink(api, key, lat=lat, lon=lon, node_id=a.node, demo_position=demo,
+                               clip_seconds=0 if a.no_clip else 6.0)
         threading.Thread(target=cc.check, daemon=True).start()
         # The direct post already files hazards; the phone's IDX1|S copy would file them a second time
         # from the phone's own location. The mesh broadcast to phones is unchanged.
@@ -242,6 +244,8 @@ def main() -> int:
             time.sleep(0.05)
             continue
         n += 1
+        if cc is not None:
+            cc.push_frame(frame)
         if time.time() - t_fps >= 1.0:
             fps, n, t_fps = n / (time.time() - t_fps), 0, time.time()
 

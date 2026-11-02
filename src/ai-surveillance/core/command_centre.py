@@ -17,6 +17,12 @@ command line (``--lat/--lon``). ``--demo-pin`` uses a fixed point inside the PCC
 drone map instead and tells the command centre it is a demo position, so the
 incident is drawn where the drone swarm can fly and is labelled as such.
 
+Clips: the camera loop hands every frame to ``push_frame``; the last few seconds
+are kept small (320 px, ~4 fps). When a description names a hazard, that buffer is
+encoded to a short MP4 (H.264 ``avc1``, falling back to VP8 WebM, then ``mp4v``; browsers play the first two)
+and sent as ``clipBase64`` with the frame, so the audit trail can play what the
+camera saw in the seconds before it raised the alarm. ``--no-clip`` turns it off.
+
 Sends happen on a background thread, newest first; a description is never held
 up waiting for the network, and an old frame is dropped rather than queued for
 minutes behind a slow link.
@@ -24,7 +30,10 @@ minutes behind a slow link.
 from __future__ import annotations
 
 import base64
+import collections
+import os
 import queue
+import tempfile
 import threading
 import time
 import uuid
@@ -44,12 +53,14 @@ class Frame:
     alert_level: str
     hazards: list
     at: float
+    clip: tuple[str, str] | None = None
 
 
 class CommandCentreLink:
     def __init__(self, api: str, gateway_key: str, *, lat: float, lon: float, node_id: str = "vlm-cam-01",
                  label: str | None = None, demo_position: bool = False, city_id: str = "pune",
-                 max_px: int = 640, quality: int = 70, timeout: float = 12.0):
+                 max_px: int = 640, quality: int = 70, timeout: float = 12.0,
+                 clip_seconds: float = 6.0, clip_fps: float = 4.0, clip_px: int = 320):
         self.api = api.rstrip("/")
         if self.api.endswith("/api/v1"):
             self.api = self.api[: -len("/api/v1")]
@@ -62,17 +73,69 @@ class CommandCentreLink:
         self.max_px, self.quality, self.timeout = max_px, quality, timeout
         self.sent = self.reports = self.failed = 0
         self.last: dict = {}
+        self.clip_seconds, self.clip_fps, self.clip_px = clip_seconds, clip_fps, clip_px
+        self._ring: collections.deque = collections.deque(maxlen=max(1, int(clip_seconds * clip_fps)))
+        self._ring_t = 0.0
+        self._ring_lock = threading.Lock()
         self._q: queue.Queue = queue.Queue(maxsize=2)
         threading.Thread(target=self._worker, daemon=True, name="command-centre").start()
         where = f"{self.lat:.5f}, {self.lon:.5f}" + (" (DEMO POSITION)" if self.demo else "")
         print(f"[cc] direct link on: {self.api}/api/v1/ingest/camera  node={self.node}  at {where}")
 
     # -------------------------------------------------------------- input --
+    def push_frame(self, image) -> None:
+        """Every camera frame comes through here; a few per second are kept for the clip."""
+        if self.clip_seconds <= 0:
+            return
+        now = time.time()
+        if now - self._ring_t < 1.0 / self.clip_fps:
+            return
+        self._ring_t = now
+        try:
+            h, w = image.shape[:2]
+            s = min(1.0, self.clip_px / float(max(h, w)))
+            small = cv2.resize(image, (int(w * s) // 2 * 2, int(h * s) // 2 * 2), interpolation=cv2.INTER_AREA)
+        except Exception:  # noqa: BLE001
+            return
+        with self._ring_lock:
+            self._ring.append(small)
+
+    def _clip(self) -> tuple[str, str] | None:
+        """The buffered seconds as a data URL, or None (no frames / no codec)."""
+        with self._ring_lock:
+            frames = list(self._ring)
+        if len(frames) < 4:
+            return None
+        h, w = frames[0].shape[:2]
+        for fourcc, ext, mime in (("avc1", ".mp4", "video/mp4"), ("VP80", ".webm", "video/webm"), ("mp4v", ".mp4", "video/mp4")):
+            fd, path = tempfile.mkstemp(suffix=ext)
+            os.close(fd)
+            try:
+                vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc), self.clip_fps, (w, h))
+                if not vw.isOpened():
+                    continue
+                for fr in frames:
+                    if fr.shape[:2] == (h, w):
+                        vw.write(fr)
+                vw.release()
+                data = open(path, "rb").read()
+                if 1000 < len(data) <= 3_400_000:
+                    return f"data:{mime};base64," + base64.b64encode(data).decode(), mime
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        return None
+
     def offer(self, image, text: str, alert_level: str = "", hazards: list | None = None) -> None:
         """Queue one described frame (non-blocking; the oldest waiting frame is dropped)."""
         if not text:
             return
-        item = Frame(image=image, text=text, alert_level=alert_level or "", hazards=list(hazards or []), at=time.time())
+        clip = self._clip() if (hazards or (alert_level or "").lower() in ("warning", "critical", "high", "alert")) else None
+        item = Frame(image=image, text=text, alert_level=alert_level or "", hazards=list(hazards or []), at=time.time(), clip=clip)
         while True:
             try:
                 self._q.put_nowait(item)
@@ -118,6 +181,8 @@ class CommandCentreLink:
                 "hazards": [str(h) for h in f.hazards][:12], "confidence": 0.75, "demoPosition": self.demo,
                 "label": self.label, "occurredAt": int(f.at), "cityId": self.city,
                 "imageBase64": self._jpeg_b64(f.image)}
+        if f.clip:
+            body["clipBase64"], body["clipMime"] = f.clip
         for attempt in (1, 2):
             try:
                 r = requests.post(f"{self.api}/api/v1/ingest/camera", headers={"X-Mesh-Gateway-Key": self.key},
