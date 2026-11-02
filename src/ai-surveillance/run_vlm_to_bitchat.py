@@ -1,322 +1,234 @@
-"""VLM + Bitchat integration: Send VLM scene descriptions and images to Bitchat.
+﻿"""Live camera -> VLM description on screen -> same frame + description to Bitchat.
 
-This script runs the VLM on your webcam and sends:
-  - Scene descriptions as text messages
-  - Keyframe images with analysis captions
+  python run_vlm_to_bitchat.py                    # A36 smart camera (index 2, DSHOW)
+  python run_vlm_to_bitchat.py --camera 0         # laptop webcam
+  python run_vlm_to_bitchat.py --no-share         # describe on screen only
 
-Setup:
-  1. Update BITCHAT_IP in configs/pipeline.yaml OR set env var BITCHAT_IP
-  2. Ensure Bitchat VLM API is enabled on your Android device
-  3. Run: python run_vlm_to_bitchat.py
+Keys in the video window:
+  S      toggle sharing to Bitchat on/off (shown top-right)
+  SPACE  describe the current frame now
+  Q/Esc  quit
 
-Controls:
-  Q / ESC  — quit
-  SPACE    — force immediate VLM inference and send to Bitchat
+How it decides when to describe: every --every seconds, but a frame that looks
+the same as the last described one (64x36 thumbnail diff) is skipped, so the VLM
+and the mesh are only used when the scene changes. FIRE/FLOOD-like alerts are
+shared immediately; repeated identical descriptions are not re-sent.
+
+Sharing = public Bitchat broadcast: every participant on the mesh receives the
+frame and its description (visible to all roles, "All" chip).
 """
 from __future__ import annotations
 
-import os
+import argparse
+import queue
 import sys
-import time
 import textwrap
 import threading
+import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+APP = Path(__file__).resolve().parent
+sys.path.insert(0, str(APP))
 
-from core.bitchat import BitchatAlertClient, build_client_from_config
-from core.config import load_pipeline_config
+from core.mesh_alert import BitchatSender, MeshAlert  # noqa: E402
 
-
-CAMERA_ID       = 0
-CAPTURE_W       = 1280
-CAPTURE_H       = 720
-DISPLAY_W       = 960
-VLM_INTERVAL_S  = 20.0
-DEVICE          = "cuda:0"
-MAX_NEW_TOKENS  = 256
-MODEL_ID        = "Qwen/Qwen2.5-VL-3B-Instruct"
-VLM_OFFLOAD_DIR = os.environ.get("VLM_OFFLOAD_DIR", "D:/qwen_vlm_offload")
-
-SCENE_PROMPT = (
-    "You are a surveillance camera AI. Look at this image carefully and describe "
-    "in 1-2 sentences exactly what you see: the people, their actions, what they "
-    "are doing, any objects of interest, and anything unusual. Be specific and factual."
+PROMPT = (
+    "You are a live safety camera. In 2 to 3 sentences (under 60 words) describe what is "
+    "happening right now: the place, the people and what they are doing, and any danger "
+    "such as fire, smoke, flood, a fall, a fight or an injury. If everything is normal, say so."
 )
-
-ENTITY_PROMPT = (
-    "You are analyzing a surveillance frame. List only what you can actually see. "
-    "Respond with a JSON array and nothing else. Each element must be an object "
-    'with keys: "type" (one of: person, fall, fire, smoke, fight, gathering, '
-    'suspicious, object_left), "confidence" (a number 0.0-1.0), '
-    'and "description" (a short factual phrase). '
-    "If you see nothing notable, respond with []."
-)
+HAZARDS = ["fire", "smoke", "flood", "fall", "fight", "injured_person", "weapon", "crowd",
+           "building_collapse", "accident", "other"]
 
 
-print("[vlm] Loading Qwen2.5-VL-3B-Instruct with NF4 quantization...")
-print("[vlm] This takes ~30-45s on first run...")
-
-import torch
-os.environ.setdefault("USE_TF", "0")
-if not torch.cuda.is_available():
-    raise RuntimeError(
-        "CUDA-enabled PyTorch is required for NF4 VLM inference. "
-        "Install the CUDA PyTorch build or run this script with the working GPU interpreter."
-    )
-from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    AutoProcessor,
-    BitsAndBytesConfig,
-)
-
-bnb_cfg = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_type="nf4",
-)
-
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID,
-    quantization_config=bnb_cfg,
-    device_map="auto",
-    max_memory={0: "3.5GiB", "cpu": "5GiB"},
-    torch_dtype=torch.float16,
-    low_cpu_mem_usage=True,
-    use_safetensors=True,
-    offload_state_dict=True,
-    offload_folder=VLM_OFFLOAD_DIR,
-)
-model.eval()
-
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-
-vram_gb = torch.cuda.memory_allocated() / (1024 ** 3)
-print(f"[vlm] Model loaded. VRAM: {vram_gb:.2f} GB")
+def open_camera(index: int, wait_s: float):
+    t0, last = time.time(), -10.0
+    while time.time() - t0 < wait_s:
+        for be in (cv2.CAP_DSHOW, cv2.CAP_MSMF):
+            cap = cv2.VideoCapture(index, be)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                t1 = time.time()
+                while time.time() - t1 < 3:
+                    ok, f = cap.read()
+                    if ok and f is not None and f.mean() > 5:
+                        print(f"[cam] camera {index} live {f.shape[1]}x{f.shape[0]} after {time.time() - t0:.0f}s")
+                        return cap
+            cap.release()
+        if time.time() - last >= 10:
+            last = time.time()
+            print(f"[cam] waiting for camera {index} ... {time.time() - t0:.0f}s (open the camera app on the phone)")
+        time.sleep(1)
+    raise RuntimeError(f"camera {index} sent no frames in {wait_s:.0f}s")
 
 
-cfg = load_pipeline_config()
-bitchat_client = build_client_from_config(cfg)
-
-if bitchat_client is None:
-    print("[bitchat] ERROR: Bitchat client not configured. Check pipeline.yaml")
-    sys.exit(1)
+def thumb(img):
+    return cv2.cvtColor(cv2.resize(img, (64, 36), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.float32)
 
 
-def run_prompt(frame_bgr: np.ndarray, prompt: str) -> str:
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": frame_rgb},
-                {"type": "text",  "text": prompt},
-            ],
-        }
-    ]
-
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = processor(
-        text=[text],
-        images=[frame_rgb],
-        return_tensors="pt",
-        padding=True,
-    ).to(DEVICE)
-
-    with torch.no_grad():
-        out_ids = model.generate(
-            **inputs,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            use_cache=True,
-        )
-
-    result = processor.batch_decode(
-        out_ids[:, inputs["input_ids"].shape[1]:],
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=True,
-    )[0]
-    return result.strip()
-
-
-def vlm_inference(frame_bgr: np.ndarray) -> tuple[str, str]:
-    t0 = time.perf_counter()
-
-    scene = run_prompt(frame_bgr, SCENE_PROMPT)
-    print(f"[vlm] SCENE: {scene}")
-
-    entities_raw = run_prompt(frame_bgr, ENTITY_PROMPT)
-    print(f"[vlm] ENTITIES: {entities_raw}")
-
-    elapsed = time.perf_counter() - t0
-    print(f"[vlm] inference done in {elapsed:.1f}s")
-    return scene, entities_raw
-
-
-_lock             = threading.Lock()
-_vlm_scene: list  = ["Waiting for first VLM inference..."]
-_vlm_entities: list = [""]
-_vlm_running: list  = [False]
-_vlm_last_t: list   = [0.0]
-_force_vlm: list    = [False]
-
-
-def _vlm_thread_fn(frame_snap: np.ndarray) -> None:
-    with _lock:
-        _vlm_running[0] = True
-    try:
-        scene, entities = vlm_inference(frame_snap)
-        with _lock:
-            _vlm_scene[0]    = scene
-            _vlm_entities[0] = entities
-            _vlm_last_t[0]   = time.perf_counter()
-        
-        print(f"[bitchat] Sending scene: {scene[:80]}...")
-        bitchat_client.send_scene(scene, frame_snap)
-        
-    except Exception as e:
-        print(f"[vlm] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        with _lock:
-            _vlm_scene[0] = f"VLM error: {e}"
-    finally:
-        with _lock:
-            _vlm_running[0] = False
-
-
-def maybe_launch_vlm(frame: np.ndarray, forced: bool = False) -> None:
-    with _lock:
-        running = _vlm_running[0]
-        last_t  = _vlm_last_t[0]
-
-    if running:
-        return
-
-    elapsed_since_last = time.perf_counter() - last_t
-    if not forced and elapsed_since_last < VLM_INTERVAL_S:
-        return
-
-    t = threading.Thread(target=_vlm_thread_fn, args=(frame.copy(),), daemon=True)
-    t.start()
-
-
-def draw_overlay(vis: np.ndarray, scene: str, entities: str, running: bool) -> None:
+def draw(frame, state, share_on, fps):
+    vis = frame.copy()
     h, w = vis.shape[:2]
+    status = "VLM thinking..." if state["busy"] else f"VLM {state['latency']:.1f}s"
+    share = "SHARING TO BITCHAT" if share_on else "sharing OFF"
+    cv2.rectangle(vis, (0, 0), (w, 30), (0, 0, 0), -1)
+    cv2.putText(vis, f"fps {fps:4.1f} | {status} | sent {state['sent']}", (8, 21),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA)
+    (tw, _), _ = cv2.getTextSize(share, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+    cv2.putText(vis, share, (w - tw - 10, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (0, 220, 0) if share_on else (0, 0, 255), 2, cv2.LINE_AA)
+    text = state["text"]
+    if text:
+        scale = max(0.55, w / 1600)
+        cw = cv2.getTextSize("M", cv2.FONT_HERSHEY_SIMPLEX, scale, 1)[0][0] * 0.8
+        lines = textwrap.wrap(text, max(20, int((w - 20) / cw)))[:6]
+        lh = int(30 * scale) + 6
+        y0 = h - lh * len(lines) - 12
+        ov = vis.copy()
+        cv2.rectangle(ov, (0, y0), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(ov, 0.65, vis, 0.35, 0, vis)
+        col = (0, 0, 255) if state["level"] in ("high", "critical") else (0, 255, 180)
+        for i, ln in enumerate(lines):
+            cv2.putText(vis, ln, (10, y0 + lh * (i + 1) - 4), cv2.FONT_HERSHEY_SIMPLEX, scale, col, 1, cv2.LINE_AA)
+    return vis
 
-    status = "🤔 VLM thinking..." if running else f"✅ VLM→Bitchat | SPACE=force | Q=quit"
-    bar_color = (60, 30, 0) if running else (0, 50, 0)
-    cv2.rectangle(vis, (0, 0), (w, 28), bar_color, -1)
-    cv2.putText(vis, status, (8, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
 
-    if scene:
-        chars_per_line = max(40, w // 9)
-        lines = []
-        for para in scene.split("\n"):
-            lines.extend(textwrap.wrap(para, chars_per_line) or [""])
-        lines = lines[:4]
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", type=int, default=2, help="2 = Samsung A36 smart camera, 0 = laptop webcam")
+    ap.add_argument("--wait", type=float, default=180, help="seconds to wait for the camera to start")
+    ap.add_argument("--every", type=float, default=8.0, help="seconds between VLM looks")
+    ap.add_argument("--change", type=float, default=6.0, help="min scene change to describe again")
+    ap.add_argument("--ip", default="172.20.10.4", help="phone IP (auto-found on this Wi-Fi if it moved)")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--no-share", action="store_true")
+    ap.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = run until Q)")
+    a = ap.parse_args()
 
-        box_h = len(lines) * 20 + 12
-        cv2.rectangle(vis, (0, h - box_h - 4), (w, h), (0, 0, 0), -1)
-
-        for i, line in enumerate(lines):
-            y = h - box_h + i * 20 + 16
-            cv2.putText(vis, line, (6, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 160), 1)
-
-    if entities and entities.strip() not in ("[]", ""):
-        import json, re
+    share = {"on": not a.no_share}
+    sender = None
+    if share["on"]:
         try:
-            raw = re.sub(r"```(?:json)?|```", "", entities).strip()
-            ents = json.loads(raw)
-            x_start = w - 300
-            cv2.rectangle(vis, (x_start - 6, 32), (w, 32 + len(ents) * 22 + 10),
-                          (0, 0, 60), -1)
-            for i, e in enumerate(ents):
-                label = (f"[{e.get('type','?').upper()}] "
-                         f"{int(e.get('confidence', 0) * 100)}%  "
-                         f"{e.get('description', '')[:30]}")
-                cv2.putText(vis, label, (x_start, 50 + i * 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 200, 100), 1)
-        except Exception:
-            pass
+            sender = BitchatSender.connect(a.ip, a.port)
+        except ConnectionError as e:
+            print(f"[mesh] {e}\n[mesh] continuing with on-screen descriptions only")
+            share["on"] = False
+
+    from vlm.core import VLMConfig, VLMCore
+    cfg = VLMConfig.from_yaml()
+    cfg.lora_adapter = ""
+    cfg.analyzer_cfg = {**cfg.analyzer_cfg, "warmup": True, "skip_if_unchanged": False,
+                        "scene_max_new_tokens": 90, "mark_actors": False}
+    cfg.profiles = {**cfg.profiles, "live": {**cfg.profiles.get("generic", {}),
+                                            "description": "live safety camera",
+                                            "scene_prompt": PROMPT, "hazard_types": HAZARDS}}
+    core = VLMCore(cfg)
+    if not core.initialize():
+        print("[vlm] failed to load")
+        return 3
+    an = core.analyzer
+    an.set_profile("live")
+
+    cap = open_camera(a.camera, a.wait)
+
+    state = {"text": "Waiting for the first description...", "level": "", "busy": False,
+             "latency": 0.0, "sent": 0}
+    lock = threading.Lock()
+    outbox: queue.Queue = queue.Queue(maxsize=1)      # newest alert only
+    stop = threading.Event()
+
+    def sender_loop():
+        while not stop.is_set():
+            try:
+                alert = outbox.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if sender.send(alert).ok:
+                    with lock:
+                        state["sent"] += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"[mesh] send failed: {e}")
+
+    if sender is not None:
+        threading.Thread(target=sender_loop, daemon=True).start()
+
+    last_desc = {"t": -1e9, "thumb": None, "text": ""}
+
+    def describe(frame):
+        try:
+            res = an.analyze(frame, actors=None, force=True)
+            text = res.scene.strip()
+            hz = [h["type"] for h in res.hazards]
+            with lock:
+                state.update(text=f"[{res.alert_level.upper()}] {text}", level=res.alert_level,
+                             latency=res.latency_s)
+            print(f"[vlm] {res.latency_s:.1f}s [{res.alert_level}] {text}  hazards={hz}")
+            if share["on"] and sender is not None and text and text != last_desc["text"]:
+                alert = MeshAlert(image=frame, text=text, alert_level=res.alert_level,
+                                  hazards=hz, source=f"cam{a.camera}_{time.strftime('%H%M%S')}.jpg")
+                try:
+                    outbox.get_nowait()          # drop an older unsent alert
+                except queue.Empty:
+                    pass
+                outbox.put_nowait(alert)
+            last_desc["text"] = text
+        except Exception as e:  # noqa: BLE001
+            print(f"[vlm] error: {e}")
+        finally:
+            with lock:
+                state["busy"] = False
+
+    win = "VLM live -> Bitchat"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    t_start, fps, n, t_fps = time.time(), 0.0, 0, time.time()
+    force = True
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            time.sleep(0.05)
+            continue
+        n += 1
+        if time.time() - t_fps >= 1.0:
+            fps, n, t_fps = n / (time.time() - t_fps), 0, time.time()
+
+        with lock:
+            busy = state["busy"]
+        now = time.time()
+        if not busy and (force or now - last_desc["t"] >= a.every):
+            th = thumb(frame)
+            changed = last_desc["thumb"] is None or float(np.mean(np.abs(th - last_desc["thumb"]))) >= a.change
+            if force or changed:
+                last_desc.update(t=now, thumb=th)
+                with lock:
+                    state["busy"] = True
+                threading.Thread(target=describe, args=(frame.copy(),), daemon=True).start()
+            else:
+                last_desc["t"] = now
+            force = False
+
+        cv2.imshow(win, draw(frame, state, share["on"] and sender is not None, fps))
+        k = cv2.waitKey(1) & 0xFF
+        if k in (27, ord("q")):
+            break
+        if k == ord(" "):
+            force = True
+        if k == ord("s") and sender is not None:
+            share["on"] = not share["on"]
+            print(f"[mesh] sharing {'ON' if share['on'] else 'OFF'}")
+        if a.seconds and now - t_start > a.seconds:
+            break
+
+    stop.set()
+    cap.release()
+    cv2.destroyAllWindows()
+    print(f"[done] alerts sent: {state['sent']}")
+    return 0
 
 
-print(f"\n[cam] Opening camera {CAMERA_ID} at {CAPTURE_W}x{CAPTURE_H} ...")
-cap = cv2.VideoCapture(CAMERA_ID)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_W)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
-cap.set(cv2.CAP_PROP_FPS, 30)
-
-if not cap.isOpened():
-    raise RuntimeError(f"Cannot open camera {CAMERA_ID}")
-
-print("[cam] Camera open. Starting live feed.")
-print(f"[vlm] First inference in ~{VLM_INTERVAL_S:.0f}s or press SPACE to force now.\n")
-
-WIN = "VLM → Bitchat"
-cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(WIN, DISPLAY_W, int(DISPLAY_W * CAPTURE_H / CAPTURE_W))
-
-frame_idx = 0
-fps_t0    = time.perf_counter()
-fps_count = 0
-fps       = 0.0
-
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        print("[cam] Frame read failed — retrying...")
-        time.sleep(0.05)
-        continue
-
-    frame_idx += 1
-    fps_count  += 1
-    now = time.perf_counter()
-    if now - fps_t0 >= 0.5:
-        fps    = fps_count / (now - fps_t0)
-        fps_t0    = now
-        fps_count = 0
-
-    with _lock:
-        forced = _force_vlm[0]
-        if forced:
-            _force_vlm[0] = False
-
-    maybe_launch_vlm(frame, forced=forced)
-
-    scale = DISPLAY_W / frame.shape[1]
-    vis   = cv2.resize(frame, (DISPLAY_W, int(frame.shape[0] * scale)))
-
-    with _lock:
-        scene    = _vlm_scene[0]
-        entities = _vlm_entities[0]
-        running  = _vlm_running[0]
-
-    draw_overlay(vis, scene, entities, running)
-
-    fps_str = f"FPS:{fps:4.1f}"
-    cv2.putText(vis, fps_str, (vis.shape[1] - 90, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-
-    cv2.imshow(WIN, vis)
-    key = cv2.waitKey(1) & 0xFF
-
-    if key in (ord("q"), 27):
-        print("[cam] Quit.")
-        break
-    elif key == ord(" "):
-        with _lock:
-            _force_vlm[0] = True
-        print("[vlm] Force inference requested by user.")
-
-cap.release()
-cv2.destroyAllWindows()
-print("Done.")
+if __name__ == "__main__":
+    sys.exit(main())

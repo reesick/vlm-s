@@ -241,8 +241,12 @@ class BitchatAlertClient:
             url = self.base_url + "/send/text"
             text_payload = data.get("text") or data.get("description", "")
             print(f"[bitchat] Sending text: {text_payload[:80]}")
-            
-            payload = {"text": text_payload}
+
+            # The phone app wraps API text as a Gov-only camera packet unless it
+            # already contains "IDX1|"; this neutral tag keeps it visible to every
+            # role (and is stripped from the chat bubble). UNSET = "All" chip.
+            from core.mesh_alert import VISIBLE_TAG
+            payload = {"text": text_payload + VISIBLE_TAG, "category": "UNSET"}
             chan = data["dest"] if "dest" in data else self.channel
             if chan:
                 payload["channel"] = chan
