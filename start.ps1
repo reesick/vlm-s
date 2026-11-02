@@ -7,6 +7,11 @@
 #   .\start.ps1 -Mode images          # send data\disaster_images\* + VLM descriptions to the phone
 #   .\start.ps1 -Mode pipeline        # full stack: detection, pose, events, VLM, alerts
 #   .\start.ps1 -Mode setup           # only install / download, run nothing
+#   .\start.ps1 -Api https://disruptionops-jq8g.onrender.com -GatewayKey <MESH_GATEWAY_KEY> -Lat 17.9583 -Lon 74.4127
+#                                     # also post every frame + VLM description (+ where the camera is)
+#                                     # straight to the command centre over the internet
+#   .\start.ps1 -Api ... -GatewayKey ... -DemoPin
+#                                     # camera placed inside the PCCOE drone map, labelled "demo position"
 #
 # First run: creates src\ai-surveillance\.venv, installs requirements (torch is ~3 GB)
 # and downloads Qwen2.5-VL-3B (~7 GB). Later runs start in seconds.
@@ -18,8 +23,16 @@ param(
     [int]$Port = 8765,
     [switch]$NoShare,
     [string]$CcUrl = "",
-    [string]$CcKey = ""
+    [string]$CcKey = "",
+    [string]$Api = $env:INDRADHANU_API,
+    [string]$GatewayKey = $env:MESH_GATEWAY_KEY,
+    [string]$Lat = "",
+    [string]$Lon = "",
+    [switch]$DemoPin,
+    [string]$Node = "vlm-cam-01"
 )
+if (-not $Api -and $CcUrl) { $Api = $CcUrl }
+if (-not $GatewayKey -and $CcKey) { $GatewayKey = $CcKey }
 $ErrorActionPreference = "Stop"
 $App = Join-Path $PSScriptRoot "src\ai-surveillance"
 $py = Join-Path $App ".venv\Scripts\python.exe"
@@ -80,6 +93,9 @@ try {
             if ($NoShare) { $a += "--no-share" }
             if ($CcUrl)   { $a += @("--cc-url", $CcUrl) }
             if ($CcKey)   { $a += @("--cc-key", $CcKey) }
+            if ($Api)     { $a += @("--api", $Api, "--key", $GatewayKey, "--node", $Node) }
+            if ($Lat -and $Lon) { $a += @("--lat", $Lat, "--lon", $Lon) }
+            if ($DemoPin) { $a += "--demo-pin" }
             Say "live: camera $Camera. Keys in the video window: S / Space = send now, Q = quit" Green
             $code = Invoke-Py @a
         }
@@ -90,6 +106,9 @@ try {
             }
             $a = @("send_vlm_alerts.py", "--port", "$Port")
             if ($PhoneIp) { $a += @("--ip", $PhoneIp) }
+            if ($Api)     { $a += @("--api", $Api, "--key", $GatewayKey, "--node", $Node) }
+            if ($Lat -and $Lon) { $a += @("--lat", $Lat, "--lon", $Lon) }
+            if ($DemoPin) { $a += "--demo-pin" }
             $code = Invoke-Py @a
         }
         "pipeline" {

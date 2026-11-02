@@ -3,6 +3,10 @@
   python run_vlm_to_bitchat.py                    # A36 smart camera (index 2, DSHOW)
   python run_vlm_to_bitchat.py --camera 0         # laptop webcam
   python run_vlm_to_bitchat.py --no-share         # describe on screen only
+  python run_vlm_to_bitchat.py --api https://<command-centre> --key <MESH_GATEWAY_KEY> --lat 18.65 --lon 73.76
+                                                  # also post every frame + description to the command centre
+  python run_vlm_to_bitchat.py --api ... --key ... --demo-pin
+                                                  # camera placed inside the PCCOE drone map, labelled demo position
 
 Keys in the video window:
   S      toggle sharing to Bitchat on/off (shown top-right)
@@ -20,6 +24,7 @@ frame and its description (visible to all roles, "All" chip).
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import sys
 import textwrap
@@ -33,6 +38,7 @@ import numpy as np
 APP = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP))
 
+from core.command_centre import DEMO_PIN, CommandCentreLink  # noqa: E402
 from core.mesh_alert import BitchatSender, MeshAlert  # noqa: E402
 
 PROMPT = (
@@ -111,7 +117,33 @@ def main() -> int:
     ap.add_argument("--cc-url", default="", help="command-centre API base URL to set on the phone's gateway")
     ap.add_argument("--cc-key", default="", help="gateway key for the command centre")
     ap.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = run until Q)")
+    ap.add_argument("--api", default=os.environ.get("INDRADHANU_API", ""),
+                    help="command-centre base URL; every described frame is POSTed to /api/v1/ingest/camera")
+    ap.add_argument("--key", default=os.environ.get("MESH_GATEWAY_KEY", ""), help="X-Mesh-Gateway-Key for --api")
+    ap.add_argument("--lat", type=float, default=None, help="where this camera is (frames have no GPS)")
+    ap.add_argument("--lon", type=float, default=None)
+    ap.add_argument("--demo-pin", action="store_true",
+                    help=f"place the camera inside the PCCOE drone map ({DEMO_PIN[0]}, {DEMO_PIN[1]}) and label it a demo position")
+    ap.add_argument("--node", default=os.environ.get("VLM_NODE_ID", "vlm-cam-01"), help="camera id shown in the command centre")
     a = ap.parse_args()
+
+    cc = None
+    api = a.api or a.cc_url
+    if api:
+        key = a.key or a.cc_key
+        if a.demo_pin or a.lat is None or a.lon is None:
+            if not a.demo_pin:
+                print("[cc] no --lat/--lon given: using the demo position inside the PCCOE drone map")
+            lat, lon, demo = DEMO_PIN[0], DEMO_PIN[1], True
+        else:
+            lat, lon, demo = a.lat, a.lon, False
+        if not key:
+            print("[cc] --api given without --key (MESH_GATEWAY_KEY): the command centre will refuse the frames")
+        cc = CommandCentreLink(api, key, lat=lat, lon=lon, node_id=a.node, demo_position=demo)
+        threading.Thread(target=cc.check, daemon=True).start()
+        # The direct post already files hazards; the phone's IDX1|S copy would file them a second time
+        # from the phone's own location. The mesh broadcast to phones is unchanged.
+        a.no_command_centre = True
 
     share = {"on": not a.no_share}
     sender = None
@@ -183,6 +215,8 @@ def main() -> int:
                 state.update(text=f"[{res.alert_level.upper()}] {text}", level=res.alert_level,
                              latency=res.latency_s)
             print(f"[vlm] {res.latency_s:.1f}s [{res.alert_level}] {text}  hazards={hz}")
+            if cc is not None and text and text != last_desc["text"]:
+                cc.offer(frame, text, res.alert_level, hz)
             if share["on"] and sender is not None and text and text != last_desc["text"]:
                 alert = MeshAlert(image=frame, text=text, alert_level=res.alert_level,
                                   hazards=hz, source=f"cam{a.camera}_{time.strftime('%H%M%S')}.jpg")

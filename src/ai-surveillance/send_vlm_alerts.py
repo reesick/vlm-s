@@ -10,6 +10,8 @@ sent for that image.
 from __future__ import annotations
 
 import argparse
+import os
+import time
 import re
 import sys
 from pathlib import Path
@@ -37,13 +39,33 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--dir", default="data/disaster_images")
     ap.add_argument("--short", action="store_true", help="send only the first sentence of each description")
+    ap.add_argument("--api", default=os.environ.get("INDRADHANU_API", ""), help="command-centre base URL (also POST each image there)")
+    ap.add_argument("--key", default=os.environ.get("MESH_GATEWAY_KEY", ""), help="X-Mesh-Gateway-Key for --api")
+    ap.add_argument("--lat", type=float, default=None)
+    ap.add_argument("--lon", type=float, default=None)
+    ap.add_argument("--demo-pin", action="store_true", help="place the camera inside the PCCOE drone map (demo position)")
+    ap.add_argument("--node", default=os.environ.get("VLM_NODE_ID", "vlm-cam-01"))
+    ap.add_argument("--gap", type=float, default=20.0, help="seconds between images when posting to the command centre")
     a = ap.parse_args()
 
     files = sorted(p for p in (APP / a.dir).iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
     if not files:
         print(f"no images in {a.dir}")
         return 1
-    sender = BitchatSender.connect(a.ip, a.port)
+    cc = None
+    if a.api:
+        from core.command_centre import DEMO_PIN, CommandCentreLink, Frame
+        demo = a.demo_pin or a.lat is None or a.lon is None
+        cc = CommandCentreLink(a.api, a.key, lat=DEMO_PIN[0] if demo else a.lat, lon=DEMO_PIN[1] if demo else a.lon,
+                               node_id=a.node, demo_position=demo)
+        cc.check()
+    try:
+        sender = BitchatSender.connect(a.ip, a.port)
+    except ConnectionError as e:
+        if cc is None:
+            raise
+        print(f"[mesh] {e}\n[mesh] no phone: images go to the command centre only")
+        sender = None
 
     from vlm.core import VLMConfig, VLMCore
     cfg = VLMConfig.from_yaml()
@@ -76,9 +98,15 @@ def main() -> int:
                           hazards=[h["type"] for h in res.hazards], source=f.name)
         print(f"\n[{i}/{len(files)}] {f.name}  VLM {res.latency_s:.1f}s  "
               f"({res.timings.get('decoder')}, kv_reused={res.timings.get('kv_reused')})\n  {alert.headline()}")
-        if sender.send(alert).ok:
+        if cc is not None:
+            cc._post(Frame(
+                image=img, text=desc, alert_level=res.alert_level, hazards=alert.hazards, at=time.time()))
+        if sender is not None and sender.send(alert, command_centre=cc is None).ok:
             sent += 1
-    print(f"\ndone: {sent}/{len(files)} alerts delivered to {sender.base}")
+        elif sender is None and cc is not None:
+            sent += 1
+            time.sleep(a.gap)
+    print(f"\ndone: {sent}/{len(files)} alerts delivered to {sender.base if sender else a.api}")
     return 0
 
 
