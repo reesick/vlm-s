@@ -45,6 +45,15 @@ def jpeg_for_mesh(img, max_dim=640, quality=70) -> bytes:
     return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tobytes()
 
 
+def split_text(text: str, max_part: int) -> list[str]:
+    """Split on sentence/word boundaries into parts of at most max_part chars."""
+    import textwrap
+    out = []
+    for para in [p for p in text.split("\n") if p.strip()]:
+        out += textwrap.wrap(para, max_part) or []
+    return out or [text[:max_part]]
+
+
 def post(url, retries=3, **kw):
     for k in range(retries):
         try:
@@ -67,6 +76,8 @@ def main() -> int:
     ap.add_argument("--dir", default="data/disaster_images")
     ap.add_argument("--channel", default=None, help="Bitchat channel; default = public chat")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--max-part", type=int, default=190,
+                    help="max chars per text message (app mesh packets fragment above 512 bytes)")
     a = ap.parse_args()
 
     base = f"http://{a.ip}:{a.port}"
@@ -145,16 +156,25 @@ def main() -> int:
             print(f"   image {len(jpg) // 1024} KB -> {code} {body}")
             rec["image_status"] = code
             time.sleep(gap)
-            payload = {"text": text}
-            if a.channel:
-                payload["channel"] = a.channel
-            code, body = post(base + "/send/text", json=payload)
-            if isinstance(body, dict) and "Rate limited" in str(body.get("error", "")):
-                time.sleep(gap)
+            # The app wraps each text in an IDX1 camera packet (~300 bytes) and mesh
+            # messages over 512 bytes are fragmented and do not arrive. Keep every
+            # part <= MAX_PART chars so text + wrapper stays under 512 bytes.
+            parts = split_text(text, a.max_part)
+            rec["text_status"] = []
+            for k, part in enumerate(parts, 1):
+                if k > 1:
+                    time.sleep(gap)
+                t = f"({k}/{len(parts)}) {part}" if len(parts) > 1 else part
+                payload = {"text": t}
+                if a.channel:
+                    payload["channel"] = a.channel
                 code, body = post(base + "/send/text", json=payload)
-            last_send = time.perf_counter()
-            print(f"   text -> {code} {body}")
-            rec["text_status"] = code
+                if isinstance(body, dict) and "Rate limited" in str(body.get("error", "")):
+                    time.sleep(gap)
+                    code, body = post(base + "/send/text", json=payload)
+                last_send = time.perf_counter()
+                print(f"   text {k}/{len(parts)} ({len(t)} chars) -> {code} {body}")
+                rec["text_status"].append(code)
         results.append(rec)
 
     out = APP_DIR / a.dir / "descriptions.json"
