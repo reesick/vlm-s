@@ -283,12 +283,17 @@ class VLMCore:
             local_files_only=True,
         )
 
+        ad = None
         if self.config.lora_adapter:
             ad = Path(self.config.lora_adapter)
             if not ad.is_absolute():
                 ad = Path(__file__).resolve().parents[1] / ad
             if not (ad / "adapter_config.json").is_file():
-                raise RuntimeError(f"[VLM] lora_adapter not found: {ad}")
+                # Model weights are not in git. Without the adapter the base
+                # Qwen model still works; train one with tools/qlora_train.py.
+                print(f"[VLM] WARNING: lora_adapter not found ({ad}); using the base model")
+                ad = None
+        if ad is not None:
             from peft import PeftModel
             # Kept UNMERGED on purpose: merging a LoRA delta into NF4 weights
             # re-quantizes them and the small delta rounds away (measured: the

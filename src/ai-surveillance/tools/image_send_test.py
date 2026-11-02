@@ -18,7 +18,7 @@ sys.path.insert(0, str(APP))
 from core.mesh_alert import BitchatSender, VISIBLE_TAG  # noqa: E402
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--ip", default="172.20.10.4")
+ap.add_argument("--ip", default="", help="phone IP (empty = find it on this Wi-Fi)")
 a = ap.parse_args()
 s = BitchatSender.connect(a.ip)
 img = cv2.imread(sorted(glob.glob(str(APP / "data/disaster_images/*.jpg")))[1])

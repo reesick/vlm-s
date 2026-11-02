@@ -5,6 +5,9 @@ Quick test to verify images are encoded and sent correctly.
 import cv2
 import numpy as np
 import time
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # src/ai-surveillance
 from core.bitchat import BitchatAlertClient
 
 def create_test_frame():

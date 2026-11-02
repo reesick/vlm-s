@@ -23,6 +23,7 @@ data/**/*.mp4
 build/
 local.properties
 *.apk
+!apk/*.apk
 *.aab
 
 # IDE / OS
@@ -51,3 +52,4 @@ structure copy.txt
 image.png
 .kotlin/
 
+structure.txt

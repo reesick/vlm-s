@@ -33,7 +33,7 @@ HAZARDS = ["building_collapse", "fire", "smoke", "wildfire", "flood", "landslide
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ip", default="172.20.10.4")
+    ap.add_argument("--ip", default="", help="phone IP (empty = find it on this Wi-Fi)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--dir", default="data/disaster_images")
     ap.add_argument("--short", action="store_true", help="send only the first sentence of each description")

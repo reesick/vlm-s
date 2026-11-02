@@ -1,4 +1,4 @@
-﻿"""Live camera -> VLM description on screen -> same frame + description to Bitchat.
+"""Live camera -> VLM description on screen -> same frame + description to Bitchat.
 
   python run_vlm_to_bitchat.py                    # A36 smart camera (index 2, DSHOW)
   python run_vlm_to_bitchat.py --camera 0         # laptop webcam
@@ -103,7 +103,7 @@ def main() -> int:
     ap.add_argument("--wait", type=float, default=180, help="seconds to wait for the camera to start")
     ap.add_argument("--every", type=float, default=8.0, help="seconds between VLM looks")
     ap.add_argument("--change", type=float, default=6.0, help="min scene change to describe again")
-    ap.add_argument("--ip", default="172.20.10.4", help="phone IP (auto-found on this Wi-Fi if it moved)")
+    ap.add_argument("--ip", default="", help="phone IP (empty = find it on this Wi-Fi)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-share", action="store_true")
     ap.add_argument("--no-command-centre", action="store_true",

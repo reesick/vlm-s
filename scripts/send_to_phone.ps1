@@ -1,13 +1,13 @@
 # Send test images (and optionally VLM descriptions) to the Bitchat phone.
-#   .\send_to_phone.ps1                      # check + 3 plain images
-#   .\send_to_phone.ps1 -Mode vlm            # every disaster image + its VLM description
-#   .\send_to_phone.ps1 -Ip 172.31.148.5 -Port 8765
+#   .\scripts\send_to_phone.ps1                      # check + 3 plain images
+#   .\scripts\send_to_phone.ps1 -Mode vlm            # every disaster image + its VLM description
+#   .\scripts\send_to_phone.ps1 -Ip 172.31.148.5 -Port 8765
 param(
     [string]$Ip = "172.31.148.5",
     [int]$Port = 8765,
     [ValidateSet("plain", "vlm")] [string]$Mode = "plain"
 )
-$App = Join-Path $PSScriptRoot "src\ai-surveillance"
+$App = Join-Path $PSScriptRoot "..\src\ai-surveillance"
 $py = Join-Path $App ".venv\Scripts\python.exe"
 $base = "http://${Ip}:${Port}"
 

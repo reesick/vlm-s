@@ -1,21 +1,29 @@
-# Ultralytics 8.x, lap, opencv-python, onnxruntime are already installed in this env.
-# Pin for reproducibility:
-ultralytics>=8.4.0
-opencv-python>=4.8
-numpy>=1.26,<2.0
+# Python 3.11, Windows/Linux, NVIDIA GPU (CUDA 12.8 wheels). Install with:
+#   python -m pip install -r requirements.txt
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0+cu128
 torchvision==0.26.0+cu128
+numpy>=1.26,<2.0
+opencv-python>=4.8
 pyyaml>=6.0
 scipy>=1.10
+requests>=2.31
+
+# Detection / tracking / pose / identity
+ultralytics>=8.4.0
 lap>=0.5
 onnxruntime-gpu>=1.22,<1.23
 onnx>=1.12,<2.0
 onnxslim>=0.1.82
 faiss-cpu>=1.8
 insightface>=0.7.3
-# VLM (Qwen2.5-VL NF4 inference)
+
+# VLM (Qwen2.5-VL-3B, NF4) + QLoRA adapter
 transformers>=4.49
 accelerate>=1.0
 bitsandbytes>=0.43
-# ultralytics-thop
+peft>=0.13
+huggingface_hub>=0.24
+
+# Tests
+pytest>=8.0

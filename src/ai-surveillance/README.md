@@ -1,3 +1,5 @@
+> Easiest start: run `.\start.ps1` from the repo root (see the root README.md).
+
 # AI Surveillance
 
 Real-time AI security camera system — end-to-end deep learning pipeline with a fully integrated **Vision Language Model (VLM) layer** for natural-language scene understanding, **Bitchat mesh network alerting** to push alerts directly to your Android phone, **Phase 5D Fight & Pose Analysis**, and automated **WiFi & Network Diagnostic Utilities**.
@@ -37,7 +39,7 @@ python run_vlm_only.py
 python run_vlm_to_bitchat.py
 
 # Diagnose Android Bitchat WiFi & API connection
-python diagnose_connection.py --ip 172.20.73.217
+python tools/bitchat_debug/diagnose_connection.py --ip 172.20.73.217
 
 # Run all unit and integration tests
 python -m pytest tests/ -v
@@ -93,7 +95,7 @@ Every surveillance alert and VLM scene description is pushed to your **Android p
 
 ### Quick WiFi Setup & Connection Guide
 
-See `QUICKSTART_WIFI.txt` for detailed step-by-step connection setup.
+See `docs/notes/QUICKSTART_WIFI.txt` (repo root) for detailed step-by-step connection setup.
 
 1. Install [Bitchat](https://github.com/permissionlesstech/bitchat-android) on your Android phone.
 2. Open Bitchat → **Settings → VLM API Settings → Enable**.
@@ -101,7 +103,7 @@ See `QUICKSTART_WIFI.txt` for detailed step-by-step connection setup.
 4. Find your device IP automatically or run diagnostic tools:
    ```bash
    # Network diagnostic & port scanner
-   python diagnose_connection.py --ip 172.20.73.217
+   python tools/bitchat_debug/diagnose_connection.py --ip 172.20.73.217
    ```
 5. Edit `configs/pipeline.yaml`:
    ```yaml
@@ -203,9 +205,9 @@ pipeline/
   main_loop.py         Full pipeline: capture→detect→track→pose→reid→face→events→VLM→Bitchat→display
 run_vlm_only.py        Standalone VLM-only webcam demo (no other models loaded)
 run_vlm_to_bitchat.py  Standalone VLM scene describer with live Bitchat pushing
-diagnose_connection.py Network connection & Bitchat API diagnostic tool
-enable_bitchat_api.py  Bitchat API helper configuration script
-QUICKSTART_WIFI.txt    Step-by-step Android WiFi setup guide
+tools/bitchat_debug/   Network connection & Bitchat API diagnostic tool
+  (diagnose_connection, enable_bitchat_api, find_bitchat, ...)
+docs/notes/QUICKSTART_WIFI.txt  Android Wi-Fi setup guide
 tools/
   export_onnx.py       FP16 ONNX export for detector + pose
   enroll_face.py       Webcam face enrollment script
