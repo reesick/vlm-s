@@ -31,6 +31,13 @@ param(
     [switch]$DemoPin,
     [string]$Node = "vlm-cam-01"
 )
+    # Load private defaults (key, URL, real lat/lon) from start.local.ps1 (git-ignored).
+    $local = Join-Path $PSScriptRoot "start.local.ps1"
+    if (Test-Path $local) { . $local }
+    if (-not $Api -and $LocalApi) { $Api = $LocalApi }
+    if (-not $GatewayKey -and $LocalGatewayKey) { $GatewayKey = $LocalGatewayKey }
+    if (-not $Lat -and $LocalLat) { $Lat = "$LocalLat" }
+    if (-not $Lon -and $LocalLon) { $Lon = "$LocalLon" }
 if (-not $Api -and $CcUrl) { $Api = $CcUrl }
 if (-not $GatewayKey -and $CcKey) { $GatewayKey = $CcKey }
 $ErrorActionPreference = "Stop"

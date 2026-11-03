@@ -105,6 +105,11 @@ class BitchatSender:
         # phone shows "[Image]"). The fixed build (bitchat-fixed.apk) shows the photo
         # itself and BROADCASTS the caption, so set BITCHAT_IMAGE_CAPTION=0 with it.
         self.image_caption = os.environ.get("BITCHAT_IMAGE_CAPTION", "1") != "0"
+        # Camera position: a "geo:lat,lon" tag lets every phone and the command centre pin it on the map.
+        self.geo = ""
+
+    def set_location(self, lat: float, lon: float) -> None:
+        self.geo = f" geo:{lat:.5f},{lon:.5f}"
         self._last = 0.0
         self._next_ok = 0.0
 
@@ -245,12 +250,12 @@ class BitchatSender:
         print(f"[mesh] image {name} {len(jpg) // 1024} KB -> {r.status_code if r is not None else 'failed'}")
         text_ok = []
         for part in alert.text_parts():
-            r = self._post("/send/text", json={"text": part + VISIBLE_TAG, "category": "UNSET"})
+            r = self._post("/send/text", json={"text": part + self.geo + VISIBLE_TAG, "category": "UNSET"})
             ok = bool(r is not None and r.status_code == 200)
             text_ok.append(ok)
             print(f"[mesh]   text {len(part)} chars -> {r.status_code if r is not None else 'failed'}")
         if command_centre:
-            cc = alert.headline()[:1200]
+            cc = alert.headline()[:1200] + self.geo
             r = self._post("/send/text", json={"text": cc})
             ok = bool(r is not None and r.status_code == 200)
             text_ok.append(ok)

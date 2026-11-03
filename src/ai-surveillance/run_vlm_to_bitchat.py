@@ -116,6 +116,7 @@ def main() -> int:
                     help="do not send the extra IDX1|S copy the gateway forwards to the command centre")
     ap.add_argument("--cc-url", default="", help="command-centre API base URL to set on the phone's gateway")
     ap.add_argument("--cc-key", default="", help="gateway key for the command centre")
+    ap.add_argument("--city", default="pune", help="command-centre city id")
     ap.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = run until Q)")
     ap.add_argument("--api", default=os.environ.get("INDRADHANU_API", ""),
                     help="command-centre base URL; every described frame is POSTed to /api/v1/ingest/camera")
@@ -157,7 +158,10 @@ def main() -> int:
             share["on"] = False
     if sender is not None:
         if a.cc_url:
-            print(f"[cc] configuring phone gateway -> {a.cc_url}: {sender.configure_gateway(a.cc_url, a.cc_key)}")
+            print(f"[cc] configuring phone gateway -> {a.cc_url}: {sender.configure_gateway(a.cc_url, a.cc_key, a.city)}")
+        if a.lat is not None and a.lon is not None:
+            sender.set_location(a.lat, a.lon)
+            print(f"[geo] alerts pinned at {a.lat:.5f},{a.lon:.5f}")
         g = sender.gateway_status()
         print(f"[cc] gateway enabled={g.get('enabled')} url={g.get('api_url') or '-'} key_set={g.get('gateway_key_set')} "
               f"online={g.get('online')} queued={g.get('queued')} last={g.get('last_result')}")
